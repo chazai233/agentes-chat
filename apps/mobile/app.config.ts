@@ -213,6 +213,8 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     ],
     // Android release builds signed with the upload key from the environment (the Android build workflow).
     "./plugins/with-android-release-signing",
+    // Tailnet (`*.ts.net`) names the phone's resolver can't find, asked of Tailscale's DNS (Android).
+    "./plugins/with-tailnet-dns",
     // The app icons a person may pick (ADR 0179): iOS's alternate icons and Android's launcher aliases.
     "./plugins/with-app-icons",
     [
