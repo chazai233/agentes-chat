@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { API_URL } from "@/config";
 import { connectToServer, problemText } from "@/features/server";
 import { ALLOW_HTTP, serverUrl } from "@/lib/server";
+import { lastProbeDetail, probeFetch, resetProbeDetail } from "@/lib/server-probe";
 import { AuthField } from "@/ui/auth/AuthField";
 import { AuthLink } from "@/ui/auth/AuthLink";
 import { AuthScaffold, CENTER } from "@/ui/auth/AuthScaffold";
@@ -26,6 +27,8 @@ export function ServerAddress({ onDone, scan = true }: { onDone: () => void; sca
   const custom = serverUrl() !== API_URL;
   const [address, setAddress] = useState(custom ? serverHost(serverUrl()) : "");
   const [error, setError] = useState<string | null>(null);
+  // The platform's own reason under the message (`probeFetch`), so a failed check says what failed.
+  const [detail, setDetail] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const switchTo = async (server: string) => {
@@ -41,11 +44,15 @@ export function ServerAddress({ onDone, scan = true }: { onDone: () => void; sca
     if (!server) return setError(t("mobile.auth.server.invalid"));
     setBusy(true);
     setError(null);
-    const check = await checkServer(server);
+    setDetail(null);
+    resetProbeDetail();
+    // 20 s: a server reached through a relay (Tailscale's DERP) can take longer than the default 8 to answer first.
+    const check = await checkServer(server, probeFetch, 20_000);
     if (check.ok) return switchTo(check.server);
     haptics.warning();
     const host = serverHost(check.server);
     setError(t(problemText(check.problem, check.server), { host }));
+    setDetail(lastProbeDetail());
     setBusy(false);
   };
 
@@ -70,6 +77,7 @@ export function ServerAddress({ onDone, scan = true }: { onDone: () => void; sca
           onChangeText={(value) => {
             setAddress(value);
             setError(null);
+            setDetail(null);
           }}
           placeholder={t("mobile.auth.server.placeholder")}
           keyboardType="url"
@@ -87,6 +95,11 @@ export function ServerAddress({ onDone, scan = true }: { onDone: () => void; sca
       {error ? (
         <Text tone="danger" variant="small" style={CENTER}>
           {error}
+        </Text>
+      ) : null}
+      {error && detail ? (
+        <Text tone="muted" variant="small" style={CENTER} selectable>
+          {detail}
         </Text>
       ) : null}
       <Button
