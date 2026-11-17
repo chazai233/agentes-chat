@@ -138,7 +138,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       foregroundImage: `${ICONS}/night/android-foreground.png`,
       backgroundImage: `${ICONS}/night/android-background.png`,
       monochromeImage: `${ICONS}/night/android-monochrome.png`,
-      backgroundColor: "#0e3a34",
+      backgroundColor: "#fcd6c8",
     },
     predictiveBackGestureEnabled: false,
     // Never read the phone's photos or play in the background: the image picker is Android's photo picker, Salvar em
@@ -211,7 +211,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       "expo-notifications",
       {
         icon: "./assets/images/notification-icon.png",
-        color: "#1e6054",
+        color: "#e0705c",
       },
     ],
     // Android release builds signed with the upload key from the environment (the Android build workflow).

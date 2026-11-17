@@ -31,6 +31,8 @@ export const LAUNCH = {
 export const NATIVE_IMAGE = 120;
 /** So the agent's body there is this wide, centered on the screen: the splash starts exactly on it. */
 export const LOGO = (NATIVE_IMAGE * 400) / 512;
+/** This fork's name, as the launch screen writes it under its mark (a name, not a text to translate). */
+export const BRAND = "Baiyu Bot";
 /** The agent in the logo (the same as the app icon). */
 export const LOGO_LOOK = { color: "sky", eyes: "round" } as const;
 

@@ -1,22 +1,21 @@
-import {
-  bodyTones,
-  drawAccessory,
-  drawAgent,
-  drawSleep,
-  type Expression,
-  EYE_COLOR,
-} from "@agenteschat/ui/agent/engine";
-import { avatarSkyCell, avatarSkyCells, avatarSkyTones } from "@agenteschat/ui/sky/avatar";
-import { Canvas, createPicture, Picture } from "@shopify/react-native-skia";
-import { memo, useMemo } from "react";
+import { type Expression, nearestPreset } from "@agenteschat/ui/agent/engine";
+import { avatarSkyTones } from "@agenteschat/ui/sky/avatar";
+import { memo, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Platform, StyleSheet, View } from "react-native";
+import { Image, StyleSheet, View } from "react-native";
+import Animated, {
+  cancelAnimation,
+  Easing,
+  useAnimatedStyle,
+  useSharedValue,
+  withRepeat,
+  withTiming,
+} from "react-native-reanimated";
 import { useReducedMotion, useTheme } from "@/ui/theme";
-import { useFrameTime } from "./live";
+import { useLivePaused } from "./live";
 import type { AgentLookInput } from "./looks";
-import { type AgentMode, agentLayout, framedByDefault, framedLayout, poseFor, STILL_T, seedOf } from "./poses";
-import { asCtx, compile, RecordingContext } from "./recorder";
-import { replay } from "./skia-ctx";
+import { type AgentMode, agentLayout, framedByDefault, framedLayout, seedOf } from "./poses";
+import { ACCESSORIES, BODIES, BODY_BOX, type BodyColor, EYES, eyeKind } from "./sprites";
 
 export interface AgentAvatarProps {
   agent: AgentLookInput;
@@ -46,71 +45,15 @@ export interface AgentAvatarProps {
 /** Up or down the screen. */
 export type Gaze = "up" | "down";
 
-/** The eyes and the head turned toward `gaze` (fractions of the body, as the engine's `look` and `turn`). */
-const GAZE: Record<Gaze, { look: [number, number]; turn: [number, number] }> = {
-  up: { look: [0, -0.14], turn: [0, -0.35] },
-  down: { look: [0, 0.14], turn: [0, 0.35] },
-};
+/** How far the eyes slide toward `gaze`, as a share of the picture's side. */
+const GAZE: Record<Gaze, number> = { up: -0.022, down: 0.022 };
 
-/** One frame of an agent as drawing commands (the engine draws, the recorder keeps the commands). */
-export function agentFrame(
-  agent: AgentLookInput,
-  size: number,
-  mode: AgentMode,
-  t: number,
-  seed: number,
-  reduced: boolean,
-  frame?: { dark: boolean },
-  expression?: Expression,
-  dark = frame?.dark ?? false,
-  extra?: { gaze?: Gaze | undefined; bodyless?: boolean | undefined },
-) {
-  const accessory = agent.accessory && agent.accessory !== "none" ? agent.accessory : undefined;
-  const box = frame ? framedLayout(size, Boolean(accessory)) : agentLayout(size, Boolean(accessory));
-  const rec = new RecordingContext();
-  if (frame) {
-    // The tile's sky (`@agenteschat/ui/sky/avatar`): a Bayer dither from the top tone to the bottom one.
-    const [top, bottom] = avatarSkyTones(agent.color, frame.dark);
-    const n = avatarSkyCells(size * 2);
-    const cell = size / n;
-    for (let y = 0; y < n; y++)
-      for (let x = 0; x < n; x++) {
-        rec.fillStyle = avatarSkyCell(x, y, n) ? bottom : top;
-        rec.fillRect(x * cell, y * cell, cell, cell);
-      }
-  }
-  // Away on a routine: the frame keeps its sky and waits for it.
-  if (frame && extra?.bodyless) return compile(rec.commands);
-  const base = poseFor(mode, t, seed, reduced);
-  const looked = extra?.gaze ? { ...base, ...GAZE[extra.gaze] } : base;
-  drawAgent(asCtx(rec), box.x, box.y, box.inner, {
-    color: agent.color,
-    eyes: agent.eyes,
-    cells: box.cells,
-    pose: expression ? { ...looked, expression, blink: false } : looked,
-    after: (ctx, side, body) => {
-      if (box.withAccessory && accessory) drawAccessory(ctx, side, accessory, body, t, mode === "run");
-      // A sleeping agent's zz: the body's darkest tone on a light page, white on a dark one.
-      if (mode === "sleep")
-        drawSleep(
-          ctx,
-          side,
-          body,
-          dark ? EYE_COLOR : (bodyTones(agent.color)[0] ?? EYE_COLOR),
-          // A still frame shows both z's.
-          reduced || t === STILL_T ? undefined : t,
-        );
-    },
-  });
-  return compile(rec.commands);
-}
+/** One beat of each way of moving, in milliseconds (there and back is two). */
+const BEAT: Record<AgentMode, number> = { idle: 1900, run: 380, think: 1500, rest: 2600, sleep: 2600 };
 
-/**
- * How often a living agent is redrawn. Each frame is drawn in JavaScript (the engine, then a Skia picture), once per
- * agent on screen: at the clock's full 25 a second, a list of agents keeps an Android phone's JavaScript thread busy
- * enough that scrolling stutters and a tap waits. Pixel art reads the same at 8, at a third of the work.
- */
-const LIVE_FPS = Platform.OS === "android" ? 8 : undefined;
+/** A blink every few seconds, out of step between agents (`seed` is 0–7). */
+const blinkGap = (seed: number) => 2600 + ((seed * 977) % 3400);
+const BLINK_MS = 130;
 
 function AgentAvatarView({
   agent,
@@ -124,28 +67,69 @@ function AgentAvatarView({
   bodyless = false,
 }: AgentAvatarProps) {
   const reduced = useReducedMotion();
+  const paused = useLivePaused();
   const { scheme, colors: c } = useTheme();
-  const tile = framed ?? framedByDefault(size);
-  const dark = scheme === "dark";
   const { t: tr } = useTranslation();
+  const tile = framed ?? framedByDefault(size);
   const { color, eyes, accessory, id } = agent;
-  const seed = useMemo(() => seedOf(id ?? `${color}:${eyes}:${accessory ?? ""}`), [id, color, eyes, accessory]);
-  const t = useFrameTime(live && !reduced, STILL_T, LIVE_FPS);
-  const picture = useMemo(() => {
-    const frame = agentFrame(
-      { color, eyes, accessory },
-      size,
-      mode,
-      t,
-      seed,
-      reduced,
-      tile ? { dark } : undefined,
-      expression,
-      dark,
-      { gaze, bodyless },
-    );
-    return createPicture((canvas) => replay(canvas, frame), { width: size, height: size });
-  }, [color, eyes, accessory, size, mode, t, seed, reduced, tile, dark, expression, gaze, bodyless]);
+  const wears = accessory && accessory !== "none" ? ACCESSORIES[accessory] : undefined;
+  const box = tile ? framedLayout(size, Boolean(wears)) : agentLayout(size, Boolean(wears));
+  // The pictures are squares with the body at `BODY_BOX`: sized and placed so that body lands on the layout's box.
+  const side = box.inner / BODY_BOX.w;
+  const left = box.x - BODY_BOX.x * side;
+  const top = box.y + box.inner - (BODY_BOX.y + BODY_BOX.h) * side;
+  const moving = live && !reduced && !paused;
+
+  // The blink: both pictures stay mounted and trade places, so nothing loads (and nothing flickers) as it shuts.
+  const [blinking, setBlinking] = useState(false);
+  // Only the open styles shut; a smile or a sleepy line stays as it is (as in the engine).
+  const blinks =
+    moving &&
+    (mode === "idle" || mode === "think") &&
+    !expression &&
+    (eyes === "round" || eyes === "dots" || eyes === "wide");
+  const seed = seedOf(id ?? `${color}:${eyes}:${accessory ?? ""}`);
+  useEffect(() => {
+    if (!blinks) {
+      setBlinking(false);
+      return;
+    }
+    let shut: ReturnType<typeof setTimeout> | undefined;
+    const every = setInterval(() => {
+      setBlinking(true);
+      shut = setTimeout(() => setBlinking(false), BLINK_MS);
+    }, blinkGap(seed));
+    return () => {
+      clearInterval(every);
+      clearTimeout(shut);
+    };
+  }, [blinks, seed]);
+
+  // Its life, on the UI thread: one value going there and back; what it moves depends on what the agent is doing.
+  const beat = useSharedValue(0);
+  useEffect(() => {
+    if (!moving) {
+      cancelAnimation(beat);
+      beat.value = 0;
+      return;
+    }
+    beat.value = 0;
+    beat.value = withRepeat(withTiming(1, { duration: BEAT[mode], easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => cancelAnimation(beat);
+  }, [moving, mode, beat]);
+  const figure = useAnimatedStyle(() => {
+    const b = beat.value;
+    // Working: a small hop, squashed as it lands. Thinking: it sways. Otherwise it breathes (slower asleep).
+    if (mode === "run")
+      return { transform: [{ translateY: -side * 0.035 * b }, { scaleY: 1 + 0.03 * b }, { scaleX: 1 - 0.02 * b }] };
+    if (mode === "think") return { transform: [{ rotateZ: `${(b - 0.5) * 5}deg` }] };
+    return { transform: [{ scaleY: 1 + 0.022 * b }, { scaleX: 1 - 0.012 * b }] };
+  });
+
+  const shown = eyeKind(eyes, mode, expression, false);
+  const look = gaze ? GAZE[gaze] * side : mode === "think" ? -0.016 * side : 0;
+  const preset = nearestPreset(color) as BodyColor;
+  const picture = { position: "absolute" as const, left: 0, top: 0, width: side, height: side };
   const label = name
     ? tr(mode === "run" ? "mobile.a11y.agentWorking" : "mobile.a11y.agent", { name })
     : tr("mobile.a11y.agentPlain");
@@ -161,20 +145,31 @@ function AgentAvatarView({
           overflow: "hidden",
           borderWidth: StyleSheet.hairlineWidth,
           borderColor: c.line,
+          backgroundColor: avatarSkyTones(color, scheme === "dark")[0],
         },
       ]}
     >
-      <Canvas style={{ width: size, height: size }}>
-        <Picture picture={picture} />
-      </Canvas>
+      {tile && bodyless ? null : (
+        <Animated.View
+          style={[{ position: "absolute", left, top, width: side, height: side, transformOrigin: "50% 85%" }, figure]}
+        >
+          <Image source={BODIES[preset] ?? BODIES.sky} style={picture} fadeDuration={0} />
+          <Image source={EYES[shown]} style={[picture, { top: look, opacity: blinking ? 0 : 1 }]} fadeDuration={0} />
+          {blinks ? (
+            <Image source={EYES.blink} style={[picture, { top: look, opacity: blinking ? 1 : 0 }]} fadeDuration={0} />
+          ) : null}
+          {wears ? <Image source={wears} style={picture} fadeDuration={0} /> : null}
+        </Animated.View>
+      )}
     </View>
   );
 }
 
 /**
- * An agent, drawn by the shared engine (`@agenteschat/ui/agent/engine`) on a Skia canvas: never any
- * other way. Living agents share one ~25 fps clock; with reduced motion, `live={false}`, an off-screen
- * screen or the app in the background they hold a still frame.
+ * An agent, in three dimensions: its body, eyes and accessory are pictures stacked (`./sprites`), and its life (a
+ * breath, a blink, a hop while it works) runs on the UI thread, so a list of agents costs the JavaScript thread
+ * nothing per frame. With reduced motion, `live={false}`, an off-screen screen or the app in the background it
+ * holds still.
  */
 export const AgentAvatar = memo(
   AgentAvatarView,

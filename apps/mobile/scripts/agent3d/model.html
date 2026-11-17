@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>html,body{margin:0;background:#0000}canvas{display:block}</style>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+</head>
+<body>
+<script type="module">
+// The app's agents in three dimensions: the same soft square body, colours, eye styles and accessories the agent
+// engine draws flat (packages/ui/src/agent/engine.js), built as rounded solids and lit like vinyl toys.
+import * as THREE from "three";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
+
+const q = new URLSearchParams(location.search);
+const W = +(q.get("w") || 1600), H = +(q.get("h") || 1000);
+const view = q.get("view") || "lineup";
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+renderer.setSize(W, H);
+renderer.setPixelRatio(1);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.02;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.5;
+const key = new THREE.DirectionalLight(0xfff3e6, 2.1);
+key.position.set(-5, 9, 7);
+key.castShadow = true;
+key.shadow.mapSize.set(4096, 4096);
+key.shadow.radius = 16;
+key.shadow.blurSamples = 24;
+Object.assign(key.shadow.camera, { left: -12, right: 12, top: 10, bottom: -6, near: 1, far: 40 });
+key.shadow.bias = -0.0004;
+scene.add(key);
+const fill = new THREE.DirectionalLight(0xe4ebff, 0.6);
+fill.position.set(6, 2, 5);
+scene.add(fill);
+scene.add(new THREE.HemisphereLight(0xffffff, 0xf3d6cc, 0.5));
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), new THREE.ShadowMaterial({ opacity: 0.17 }));
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+/** The engine's agent colours: top and bottom of each body. `snow` is this fork's own. */
+const COLORS = {
+  sky: ["#8cc3ff", "#0063d1"],
+  indigo: ["#7d8bff", "#3f4fd6"],
+  violet: ["#ae8cf7", "#6e45d1"],
+  rose: ["#f58aa6", "#c9406a"],
+  amber: ["#f3c25c", "#c07d0b"],
+  green: ["#5fcf8b", "#1f8a4c"],
+  teal: ["#4cd0c0", "#0f8f86"],
+  graphite: ["#9a9a95", "#4a4a47"],
+  snow: ["#ffffff", "#dfe6f2"],
+};
+
+const toy = (color, o = {}) =>
+  new THREE.MeshPhysicalMaterial({ color, roughness: 0.42, clearcoat: 0.5, clearcoatRoughness: 0.35, ...o });
+const mesh = (geo, mat, cast = true) => {
+  const m = new THREE.Mesh(geo, mat);
+  m.castShadow = cast;
+  m.receiveShadow = true;
+  return m;
+};
+const ball = (r, mat, sx = 1, sy = 1, sz = 1) => {
+  const m = mesh(new THREE.SphereGeometry(r, 48, 36), mat);
+  m.scale.set(sx, sy, sz);
+  return m;
+};
+
+const BW = 2.0, BH = 1.84, BD = 1.5; // the body: a little wider than tall, as the flat one reads
+
+/** The body, its colour running from the light tone on top to the deep one below. */
+function bodyMesh(name) {
+  const [top, bottom] = COLORS[name].map((h) => new THREE.Color(h));
+  const geo = new RoundedBoxGeometry(BW, BH, BD, 10, 0.5);
+  const pos = geo.attributes.position;
+  const col = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const t = THREE.MathUtils.smoothstep(pos.getY(i), -BH / 2, BH / 2);
+    const c = bottom.clone().lerp(top, t);
+    col.set([c.r, c.g, c.b], i * 3);
+  }
+  geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  return mesh(geo, toy(0xffffff, { vertexColors: true }));
+}
+
+/** Blush on the cheeks (part of the body's picture). */
+function blush(g) {
+  const z = BD / 2 + 0.005;
+  for (const s of [-1, 1]) {
+    const b = mesh(
+      new THREE.CircleGeometry(0.14, 40),
+      new THREE.MeshBasicMaterial({ color: 0xff6f8b, transparent: true, opacity: 0.3 }),
+      false,
+    );
+    b.scale.set(1.3, 0.7, 1);
+    b.position.set(s * 0.62, -0.3, z + 0.002);
+    g.add(b);
+  }
+}
+
+const flat = (shape, depth = 0.05) =>
+  new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: true, bevelThickness: 0.025, bevelSize: 0.025, bevelSegments: 4, curveSegments: 24 });
+
+/** One eye of a kind at the origin, facing +z. `s`: -1 the left eye, 1 the right. */
+function eyeOf(kind, s, mat) {
+  const cap = (r, len, o = {}) => {
+    const e = mesh(new THREE.CapsuleGeometry(r, len, 12, 32), mat, false);
+    e.scale.z = 0.45;
+    if (o.flat) e.rotation.z = Math.PI / 2;
+    if (o.rz) e.rotation.z = o.rz;
+    e.position.y = o.y ?? 0.08;
+    return e;
+  };
+  const arc = (R, tube, up, y) => {
+    const e = mesh(new THREE.TorusGeometry(R, tube, 16, 32, Math.PI), mat, false);
+    if (up) e.rotation.z = Math.PI;
+    e.position.set(0, y, 0.02);
+    return e;
+  };
+  switch (kind) {
+    case "dots": return cap(0.105, 0.03);
+    case "wide": return cap(0.125, 0.36);
+    case "happy": return arc(0.15, 0.055, false, 0.02);
+    case "sleepy": return cap(0.06, 0.17, { flat: true, y: -0.04 });
+    case "closed": return arc(0.15, 0.05, true, 0.14);
+    case "xhappy": return arc(0.17, 0.06, false, 0.02);
+    case "writing": return cap(0.055, 0.2, { flat: true, y: -0.02 });
+    case "blink": return cap(0.036, 0.17, { flat: true, y: 0.08 });
+    case "angry": return cap(0.085, 0.2, { rz: -s * 0.55, y: 0.04 });
+    case "wink": return s < 0 ? cap(0.1, 0.3) : arc(0.15, 0.05, true, 0.14);
+    case "surprised": {
+      const e = mesh(new THREE.TorusGeometry(0.13, 0.045, 16, 40), mat, false);
+      e.scale.set(1, 1.2, 1);
+      e.position.set(0, 0.08, 0.02);
+      return e;
+    }
+    case "cross": {
+      const g = new THREE.Group();
+      g.add(cap(0.045, 0.24, { rz: 0.785, y: 0 }), cap(0.045, 0.24, { rz: -0.785, y: 0 }));
+      g.position.y = 0.08;
+      return g;
+    }
+    case "dizzy": {
+      const pts = [];
+      for (let i = 0; i <= 60; i++) {
+        const t = i / 60, a = t * Math.PI * 4.4, r = 0.02 + 0.17 * t;
+        pts.push(new THREE.Vector3(Math.cos(a) * r, Math.sin(a) * r, 0));
+      }
+      const e = mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 120, 0.032, 10), mat, false);
+      e.position.set(0, 0.08, 0.02);
+      return e;
+    }
+    case "heart": {
+      const h = new THREE.Shape();
+      h.moveTo(0, -0.17);
+      h.bezierCurveTo(-0.3, 0.02, -0.16, 0.24, 0, 0.1);
+      h.bezierCurveTo(0.16, 0.24, 0.3, 0.02, 0, -0.17);
+      const e = mesh(flat(h), mat, false);
+      e.position.set(0, 0.06, -0.02);
+      return e;
+    }
+    case "star": {
+      const st = new THREE.Shape();
+      for (let i = 0; i < 10; i++) {
+        const a = (i / 10) * Math.PI * 2 + Math.PI / 2, r = i % 2 ? 0.085 : 0.2;
+        st[i ? "lineTo" : "moveTo"](Math.cos(a) * r, Math.sin(a) * r);
+      }
+      st.closePath();
+      const e = mesh(flat(st), mat, false);
+      e.position.set(0, 0.08, -0.02);
+      return e;
+    }
+    default: return cap(0.1, 0.3); // round
+  }
+}
+
+/** The eyes: the engine's styles and passing expressions, as glossy inlays standing a little off the face. */
+function eyes(g, style, ink) {
+  const mat = new THREE.MeshPhysicalMaterial({ color: ink, roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.1 });
+  for (const s of [-1, 1]) {
+    const e = eyeOf(style, s, mat);
+    e.position.x += s * 0.27;
+    e.position.z += BD / 2 + 0.005;
+    g.add(e);
+  }
+}
+
+/** The engine's accessories, as small solids. */
+const ACCESSORIES = {
+  hat(g) {
+    const m = toy(0x2b2b33);
+    const brim = mesh(new THREE.CylinderGeometry(0.78, 0.78, 0.08, 48), m);
+    brim.position.set(0.1, BH / 2 + 0.02, 0);
+    const top = mesh(new THREE.CylinderGeometry(0.5, 0.52, 0.62, 48), m);
+    top.position.set(0.1, BH / 2 + 0.36, 0);
+    const band = mesh(new THREE.CylinderGeometry(0.535, 0.535, 0.14, 48), toy(0xe2574c));
+    band.position.set(0.1, BH / 2 + 0.14, 0);
+    g.add(brim, top, band);
+  },
+  headphones(g) {
+    const m = toy(0x2b2b33);
+    const arc = mesh(new THREE.TorusGeometry(1.1, 0.085, 16, 64, Math.PI), m);
+    arc.position.y = 0.12;
+    g.add(arc);
+    for (const s of [-1, 1]) {
+      const cup = mesh(new THREE.CylinderGeometry(0.33, 0.33, 0.24, 40), m);
+      cup.rotation.z = Math.PI / 2;
+      cup.position.set(s * (BW / 2 + 0.12), 0.1, 0);
+      const pad = mesh(new THREE.CylinderGeometry(0.26, 0.26, 0.26, 40), toy(0xf2b84b));
+      pad.rotation.z = Math.PI / 2;
+      pad.position.copy(cup.position);
+      g.add(cup, pad);
+    }
+  },
+  bow(g) {
+    const m = toy(0xff6f8b);
+    for (const s of [-1, 1]) {
+      const wing = ball(0.26, m, 1.25, 0.9, 0.6);
+      wing.position.set(0.5 + s * 0.27, BH / 2 + 0.12, 0.3);
+      wing.rotation.z = s * -0.35;
+      g.add(wing);
+    }
+    const knot = ball(0.12, m);
+    knot.position.set(0.5, BH / 2 + 0.1, 0.32);
+    g.add(knot);
+  },
+  crown(g) {
+    const m = toy(0xf5c542, { metalness: 0.5, roughness: 0.3 });
+    const ring = mesh(new THREE.CylinderGeometry(0.48, 0.52, 0.2, 48, 1, true), m);
+    ring.material.side = THREE.DoubleSide;
+    ring.position.y = BH / 2 + 0.1;
+    g.add(ring);
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      const spike = mesh(new THREE.ConeGeometry(0.13, 0.3, 20), m);
+      spike.position.set(Math.cos(a) * 0.46, BH / 2 + 0.34, Math.sin(a) * 0.46);
+      g.add(spike);
+    }
+  },
+  antenna(g) {
+    const rod = mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.5, 16), toy(0x4a4a52));
+    rod.position.set(0, BH / 2 + 0.25, 0);
+    const light = ball(0.14, new THREE.MeshStandardMaterial({ color: 0xffd54a, emissive: 0xffb300, emissiveIntensity: 0.9 }));
+    light.position.set(0, BH / 2 + 0.58, 0);
+    g.add(rod, light);
+  },
+  beanie(g) {
+    const cap = mesh(new THREE.SphereGeometry(0.86, 48, 32, 0, Math.PI * 2, 0, Math.PI / 2), toy(0xe2574c, { roughness: 0.8, clearcoat: 0 }));
+    cap.scale.set(1.08, 0.72, 0.86);
+    cap.position.y = BH / 2 - 0.12;
+    const cuff = mesh(new THREE.TorusGeometry(0.86, 0.11, 16, 64), toy(0xfbf7ee, { roughness: 0.8, clearcoat: 0 }));
+    cuff.rotation.x = Math.PI / 2;
+    cuff.scale.set(1.08, 0.86, 1);
+    cuff.position.y = BH / 2 - 0.1;
+    const pom = ball(0.2, toy(0xfbf7ee, { roughness: 0.9, clearcoat: 0 }));
+    pom.position.y = BH / 2 + 0.56;
+    g.add(cap, cuff, pom);
+  },
+  flower(g) {
+    const c = new THREE.Vector3(-0.55, BH / 2 + 0.16, 0.3);
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * Math.PI * 2;
+      const petal = ball(0.14, toy(0xffffff), 1, 1, 0.6);
+      petal.position.set(c.x + Math.cos(a) * 0.17, c.y + Math.sin(a) * 0.17, c.z);
+      g.add(petal);
+    }
+    const heart = ball(0.11, toy(0xf5c542));
+    heart.position.set(c.x, c.y, c.z + 0.05);
+    g.add(heart);
+  },
+  cap(g) {
+    const m = toy(0x2f6fd6, { roughness: 0.7, clearcoat: 0.1 });
+    const dome = mesh(new THREE.SphereGeometry(0.86, 48, 32, 0, Math.PI * 2, 0, Math.PI / 2), m);
+    dome.scale.set(1.08, 0.66, 0.86);
+    dome.position.y = BH / 2 - 0.12;
+    const visor = mesh(new THREE.CylinderGeometry(0.66, 0.66, 0.08, 48, 1, false, -Math.PI / 2, Math.PI), m);
+    visor.scale.set(1.0, 1, 0.8);
+    visor.position.set(0, BH / 2 - 0.06, 0.6);
+    const button = ball(0.08, toy(0xfbf7ee));
+    button.position.y = BH / 2 + 0.45;
+    g.add(dome, visor, button);
+  },
+  headset(g) {
+    ACCESSORIES.headphones(g);
+    const m = toy(0x2b2b33);
+    const boom = mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.75, 12), m);
+    boom.position.set(-BW / 2 - 0.02, -0.2, 0.42);
+    boom.rotation.x = 1.05;
+    const mic = ball(0.1, toy(0xe2574c));
+    mic.position.set(-BW / 2 + 0.02, -0.4, 0.78);
+    g.add(boom, mic);
+  },
+  scarf(g) {
+    const m = toy(0xe2574c, { roughness: 0.85, clearcoat: 0 });
+    const wrap = mesh(new RoundedBoxGeometry(BW + 0.14, 0.34, BD + 0.14, 6, 0.17), m);
+    wrap.position.y = -BH / 2 + 0.4;
+    const tail = mesh(new RoundedBoxGeometry(0.36, 0.62, 0.14, 4, 0.07), m);
+    tail.position.set(0.52, -BH / 2 + 0.14, BD / 2 + 0.1);
+    tail.rotation.z = -0.12;
+    g.add(wrap, tail);
+  },
+  party(g) {
+    const cone = mesh(new THREE.ConeGeometry(0.36, 0.8, 40), toy(0x8d79d6));
+    cone.position.set(0.25, BH / 2 + 0.36, 0);
+    cone.rotation.z = -0.22;
+    const pom = ball(0.1, toy(0xf5c542));
+    pom.position.set(0.34, BH / 2 + 0.78, 0);
+    g.add(cone, pom);
+  },
+};
+
+/**
+ * One agent: body, two small feet, eyes, and what it wears, standing with its feet on the ground. `only` draws one
+ * layer of it for the app's sprites ("body", "eyes" or "acc"); in the last two the body only hides what is behind it.
+ */
+function agent({ color = "sky", eyesStyle = "round", wears = null, lean = 0, turn = 0, only = null } = {}) {
+  const outer = new THREE.Group();
+  const g = new THREE.Group();
+  const b = bodyMesh(color);
+  if (only && only !== "body") {
+    b.material = new THREE.MeshBasicMaterial({ colorWrite: false });
+    b.castShadow = false;
+    b.renderOrder = -1;
+  }
+  g.add(b);
+  const ink = color === "snow" ? 0x27304a : 0xffffff;
+  if (!only || only === "body") {
+    blush(g);
+    const deep = new THREE.Color(COLORS[color][1]);
+    for (const s of [-1, 1]) {
+      const foot = ball(0.26, toy(deep), 1.1, 0.75, 1.15);
+      foot.position.set(s * 0.46, -BH / 2 - 0.06, 0.12);
+      g.add(foot);
+    }
+  }
+  if (!only || only === "eyes") eyes(g, eyesStyle, ink);
+  if (wears && (!only || only === "acc")) ACCESSORIES[wears](g);
+  g.position.y = BH / 2 + 0.22;
+  g.rotation.z = lean;
+  outer.add(g);
+  outer.rotation.y = turn;
+  return outer;
+}
+
+const camera = new THREE.PerspectiveCamera(24, W / H, 0.1, 120);
+if (view === "lineup") {
+  const cast = [
+    { color: "sky", eyesStyle: "round", wears: "headphones" },
+    { color: "rose", eyesStyle: "happy", wears: "bow" },
+    { color: "amber", eyesStyle: "wide", wears: "crown" },
+    { color: "green", eyesStyle: "dots", wears: "antenna" },
+    { color: "violet", eyesStyle: "round", wears: "hat" },
+    { color: "teal", eyesStyle: "happy", wears: "flower" },
+    { color: "indigo", eyesStyle: "sleepy", wears: "beanie" },
+    { color: "graphite", eyesStyle: "dots", wears: "party" },
+  ];
+  cast.forEach((c, i) => {
+    const row = Math.floor(i / 4), k = i % 4;
+    const a = agent({ ...c, lean: (k % 2 ? 1 : -1) * 0.05, turn: (1.5 - k) * 0.12 });
+    a.position.set((k - 1.5) * 3.5 + (row ? -0.9 : 0.9), 0, row ? 2.4 : -2.6);
+    scene.add(a);
+  });
+  camera.position.set(0, 13, 27);
+  camera.lookAt(0, 0.9, 0.2);
+} else if (view === "sprite") {
+  // One layer of an agent for the app, straight on from a little above; every layer is shot from the same place.
+  ground.visible = false;
+  scene.add(agent({ color: q.get("color") || "sky", eyesStyle: q.get("eyes") || "round", wears: q.get("wears") || null, only: q.get("only") || null }));
+  camera.fov = 18;
+  camera.updateProjectionMatrix();
+  camera.position.set(0, 2.5, 13.2);
+  camera.lookAt(0, 1.42, 0);
+} else if (view === "hero") {
+  const a = agent({ color: q.get("color") || "snow", eyesStyle: q.get("eyes") || "round", wears: q.get("wears") || null, lean: -0.06, turn: -0.42 });
+  scene.add(a);
+  camera.position.set(0, 3.0, 12.5);
+  camera.lookAt(0, 1.25, 0);
+} else {
+  // icon: straight on, close
+  const a = agent({ color: q.get("color") || "snow", eyesStyle: "round", turn: -0.22, lean: -0.03 });
+  scene.add(a);
+  camera.fov = 20;
+  camera.updateProjectionMatrix();
+  camera.position.set(0, 2.2, 13);
+  camera.lookAt(0, 1.2, 0);
+}
+renderer.render(scene, camera);
+window.__done = true;
+</script>
+</body>
+</html>
