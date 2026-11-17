@@ -55,6 +55,7 @@
 
 | 版本 | 内容 |
 |---|---|
+| v1.2.2 | 修复首页、动态等列表上下滑动不跟手、误触成左右滑动的问题 |
 | v1.2.1 | 更流畅：不在前台的标签页和被覆盖的页面暂停刷新；背景天空不再逐帧重绘；列表里的智能体静止 |
 | v1.2.0 | 3D 智能体形象；新的图标和启动画面 |
 | v1.1.0 | 存储表单修复、列表更流畅、对话即点即开、全部列表可置顶、技能按智能体开关、发送文件失败原因 |
@@ -130,6 +131,7 @@ same signature installs over the one you have.
 
 | Version | What's in it |
 |---|---|
+| v1.2.2 | Lists with swipeable rows (home, Activity) scroll with the finger again instead of sticking or opening a row |
 | v1.2.1 | Smoother: tabs you aren't on and covered screens stop updating; skies no longer redraw every frame; agents in lists hold still |
 | v1.2.0 | Agents in 3D; new icon and launch screen |
 | v1.1.0 | Storage form fix, smoother lists, conversations open at the tap, pinning from full lists, skills per agent, the reason a file didn't send |
