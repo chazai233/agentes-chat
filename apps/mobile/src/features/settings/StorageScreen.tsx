@@ -51,9 +51,12 @@ export function StorageScreen() {
   const storage = useStorage(orgId, admin);
   const edition = useEdition();
   const [choice, setChoice] = useState<Choice>("agentes");
+  // Follows the option in use only when that changes: a reload of the same settings (the app back in front, the
+  // connection back) must not take the pick back, which would close the bucket's form with what was typed in it.
+  const kindInUse = storage.data?.kind;
   useEffect(() => {
-    if (storage.data) setChoice(storage.data.kind);
-  }, [storage.data]);
+    if (kindInUse) setChoice(kindInUse);
+  }, [kindInUse]);
   // No edition's words before the server says which this is.
   const config = edition ? storage.data : undefined;
   const cloud = edition === "cloud";
