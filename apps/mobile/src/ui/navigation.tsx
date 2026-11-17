@@ -6,8 +6,10 @@ import {
   type NativeStackNavigationOptions,
   type Theme as NavigationTheme,
   Stack,
+  useIsFocused,
 } from "expo-router";
 import { type ReactNode, useLayoutEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { Freeze } from "react-freeze";
 import { useTranslation } from "react-i18next";
 import { Platform } from "react-native";
 import { needsHeaderBlur, pushOnce } from "@/lib/nav";
@@ -143,12 +145,24 @@ export function useLargeTitleOptions(): NativeStackNavigationOptions {
  * The stack inside a tab (Conversas, Agentes, Atividade): its root screen gets the native large title.
  * The title is set here too so the first frame already has it.
  */
+/**
+ * A tab the person isn't on stops rendering until they come back to it. The system tab bar keeps every tab mounted
+ * (and mounts them all at launch), so without it each change the server sent (a message, an agent's status, the work
+ * poll) re-rendered all five tabs and their stacks on the JavaScript thread, and the one in front waited. A tab not yet
+ * opened isn't drawn until it is.
+ */
+function TabFreeze({ children }: { children: ReactNode }) {
+  return <Freeze freeze={!useIsFocused()}>{children}</Freeze>;
+}
+
 export function TabStack({ title }: { title: string }) {
   const options = useLargeTitleOptions();
   return (
-    <Stack screenOptions={options}>
-      <Stack.Screen name="index" options={{ title }} />
-    </Stack>
+    <TabFreeze>
+      <Stack screenOptions={options}>
+        <Stack.Screen name="index" options={{ title }} />
+      </Stack>
+    </TabFreeze>
   );
 }
 
@@ -173,9 +187,11 @@ export function CoverTabStack({ title }: { title: string }) {
     [colors],
   );
   return (
-    <Stack screenOptions={options}>
-      <Stack.Screen name="index" options={{ title }} />
-    </Stack>
+    <TabFreeze>
+      <Stack screenOptions={options}>
+        <Stack.Screen name="index" options={{ title }} />
+      </Stack>
+    </TabFreeze>
   );
 }
 

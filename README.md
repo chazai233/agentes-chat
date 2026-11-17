@@ -55,6 +55,7 @@
 
 | 版本 | 内容 |
 |---|---|
+| v1.2.1 | 更流畅：不在前台的标签页和被覆盖的页面暂停刷新；背景天空不再逐帧重绘；列表里的智能体静止 |
 | v1.2.0 | 3D 智能体形象；新的图标和启动画面 |
 | v1.1.0 | 存储表单修复、列表更流畅、对话即点即开、全部列表可置顶、技能按智能体开关、发送文件失败原因 |
 | v1.0.0 | 第一个版本：Baiyu Bot 自己的名字、包名和图标；Tailscale 地址解析；连接失败原因 |
@@ -129,6 +130,7 @@ same signature installs over the one you have.
 
 | Version | What's in it |
 |---|---|
+| v1.2.1 | Smoother: tabs you aren't on and covered screens stop updating; skies no longer redraw every frame; agents in lists hold still |
 | v1.2.0 | Agents in 3D; new icon and launch screen |
 | v1.1.0 | Storage form fix, smoother lists, conversations open at the tap, pinning from full lists, skills per agent, the reason a file didn't send |
 | v1.0.0 | First release: Baiyu Bot's own name, package and icon; Tailscale name lookup; the reason a connection failed |

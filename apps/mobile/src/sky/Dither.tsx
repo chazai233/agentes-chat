@@ -1,6 +1,6 @@
 import { Canvas, Fill, Shader, Skia, type SkRuntimeEffect, useClock } from "@shopify/react-native-skia";
 import { useState } from "react";
-import { type LayoutChangeEvent, type StyleProp, View, type ViewStyle } from "react-native";
+import { type LayoutChangeEvent, Platform, type StyleProp, View, type ViewStyle } from "react-native";
 import { type SharedValue, useDerivedValue } from "react-native-reanimated";
 import { useLivePaused } from "@/agent/live";
 import { useReducedMotion } from "@/ui/theme";
@@ -75,7 +75,9 @@ export function Dither({
   };
   const effect = effectOf(kind);
   const { pal, last } = paletteUniform(tones);
-  const moving = animated && !reduced && !paused;
+  // On Android a moving sky redraws its whole canvas every frame on the UI thread, which is also where the list
+  // scrolls: there it is drawn once, still.
+  const moving = animated && !reduced && !paused && Platform.OS !== "android";
   const clock = useClock();
   const base = {
     size: [size.width, size.height],

@@ -9,6 +9,7 @@ import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { StyleSheet, View } from "react-native";
+import { enableFreeze } from "react-native-screens";
 import { Entering } from "@/features/auth/Entering";
 import { forgetInvite, loadPendingInvite, waitingAsk } from "@/features/auth/invite";
 import { resumesAsk } from "@/features/auth/invite-steps";
@@ -31,6 +32,10 @@ import { DeletingAccount } from "@/ui/auth/DeletingAccount";
 import { SuspendedWorkspace } from "@/ui/auth/SuspendedWorkspace";
 import { router, useNavigationTheme } from "@/ui/navigation";
 import { useTheme } from "@/ui/theme";
+
+// A screen covered by another one pushed over it stops rendering until it shows again: a conversation streaming an
+// agent's words no longer re-renders the home and the screens under it on every word.
+enableFreeze(true);
 
 void SplashScreen.preventAutoHideAsync().catch(() => {});
 // Upright everywhere but the agent's screen (`useSideways`). iOS starts this way (the plugin); Android only from here.

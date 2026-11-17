@@ -12,7 +12,7 @@
     },
     "apps/desktop": {
       "name": "@agenteschat/desktop",
-      "version": "0.5.6",
+      "version": "0.8.6",
       "dependencies": {
         "@agenteschat/adapters": "workspace:*",
         "@agenteschat/client": "workspace:*",
@@ -88,6 +88,7 @@
         "expo-web-browser": "~58.0.6",
         "i18next": "^26.4.2",
         "react": "19.3.0",
+        "react-freeze": "1.0.4",
         "react-i18next": "^17.0.15",
         "react-native": "0.88.0",
         "react-native-gesture-handler": "~3.3.0",
@@ -107,7 +108,7 @@
     },
     "apps/server": {
       "name": "@agenteschat/server",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "@agenteschat/adapters": "workspace:*",
         "@agenteschat/client": "workspace:*",
@@ -282,7 +283,7 @@
     },
     "packages/setup": {
       "name": "@agenteschat/setup",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "bin": {
         "agentes-setup": "dist/index.js",
       },

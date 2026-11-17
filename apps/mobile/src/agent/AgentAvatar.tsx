@@ -2,7 +2,7 @@ import { type Expression, nearestPreset } from "@agenteschat/ui/agent/engine";
 import { avatarSkyTones } from "@agenteschat/ui/sky/avatar";
 import { memo, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Image, StyleSheet, View } from "react-native";
+import { Image, Platform, StyleSheet, View } from "react-native";
 import Animated, {
   cancelAnimation,
   Easing,
@@ -54,6 +54,10 @@ const BEAT: Record<AgentMode, number> = { idle: 1900, run: 380, think: 1500, res
 /** A blink every few seconds, out of step between agents (`seed` is 0–7). */
 const blinkGap = (seed: number) => 2600 + ((seed * 977) % 3400);
 const BLINK_MS = 130;
+/** The smallest agent that moves on Android. */
+const LIVE_MIN = 56;
+/** Android decodes each layer at the size it is shown, not at 512 px (less memory, faster to draw while scrolling). */
+const DECODE = Platform.OS === "android" ? ({ resizeMethod: "resize" } as const) : {};
 
 function AgentAvatarView({
   agent,
@@ -78,7 +82,9 @@ function AgentAvatarView({
   const side = box.inner / BODY_BOX.w;
   const left = box.x - BODY_BOX.x * side;
   const top = box.y + box.inner - (BODY_BOX.y + BODY_BOX.h) * side;
-  const moving = live && !reduced && !paused;
+  // In a list (small) it holds still on Android: a dozen breathing rows were a dozen animations every frame while
+  // the list scrolled. Large (a profile, a hero) it lives.
+  const moving = live && !reduced && !paused && (Platform.OS !== "android" || size >= LIVE_MIN);
 
   // The blink: both pictures stay mounted and trade places, so nothing loads (and nothing flickers) as it shuts.
   const [blinking, setBlinking] = useState(false);
@@ -153,12 +159,22 @@ function AgentAvatarView({
         <Animated.View
           style={[{ position: "absolute", left, top, width: side, height: side, transformOrigin: "50% 85%" }, figure]}
         >
-          <Image source={BODIES[preset] ?? BODIES.sky} style={picture} fadeDuration={0} />
-          <Image source={EYES[shown]} style={[picture, { top: look, opacity: blinking ? 0 : 1 }]} fadeDuration={0} />
+          <Image source={BODIES[preset] ?? BODIES.sky} style={picture} fadeDuration={0} {...DECODE} />
+          <Image
+            source={EYES[shown]}
+            style={[picture, { top: look, opacity: blinking ? 0 : 1 }]}
+            fadeDuration={0}
+            {...DECODE}
+          />
           {blinks ? (
-            <Image source={EYES.blink} style={[picture, { top: look, opacity: blinking ? 1 : 0 }]} fadeDuration={0} />
+            <Image
+              source={EYES.blink}
+              style={[picture, { top: look, opacity: blinking ? 1 : 0 }]}
+              fadeDuration={0}
+              {...DECODE}
+            />
           ) : null}
-          {wears ? <Image source={wears} style={picture} fadeDuration={0} /> : null}
+          {wears ? <Image source={wears} style={picture} fadeDuration={0} {...DECODE} /> : null}
         </Animated.View>
       )}
     </View>
