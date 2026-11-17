@@ -1,6 +1,6 @@
 <p align="center"><img src="docs/baiyu/icon.png" width="112" alt="Baiyu Bot"></p>
 
-<h1 align="center">Baiyu Bot · 白羽</h1>
+<h1 align="center">Baiyu Bot · 摆鱼</h1>
 
 <p align="center">
   <a href="#中文">中文</a> · <a href="#english">English</a> ·
