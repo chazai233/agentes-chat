@@ -62,6 +62,38 @@ export async function fileText(api: ApiClient, orgId: string, a: ArtifactDetail)
   return res.text();
 }
 
+/**
+ * A PDF's bytes as base64, for the Android PDF page (pdf.js in a web view takes the bytes by message, so the page
+ * never needs the session or the network). Downloaded into the cache once per version.
+ */
+export function usePdfBytes(orgId: string, a: ArtifactDetail | null, enabled: boolean) {
+  const api = useApi();
+  return useQuery({
+    queryKey: ["org", orgId, "artifacts", "pdf-bytes", a?.id ?? "", a?.shownVersion ?? 0] as const,
+    queryFn: async () => {
+      const art = a as ArtifactDetail;
+      const dir = new Directory(Paths.cache, "pdf", `${art.id}-${art.shownVersion}`);
+      dir.create({ intermediates: true, idempotent: true });
+      const file = new File(dir, "file.pdf");
+      if (!file.exists) {
+        const r = await remote(api, orgId, art.id, art.shownVersion);
+        try {
+          await File.downloadFileAsync(r.uri, file, { headers: r.headers, idempotent: true });
+        } catch (err) {
+          // A half-written copy would be read as the file next time.
+          if (file.exists) file.delete();
+          throw err;
+        }
+      }
+      return file.base64();
+    },
+    enabled: enabled && a !== null,
+    staleTime: Number.POSITIVE_INFINITY,
+    // The text is large; dropped soon after the viewer closes (the file stays in the cache).
+    gcTime: 30_000,
+  });
+}
+
 /** A fresh folder per file under the cache, so the copy keeps its real name. */
 function cacheFile(a: ArtifactDetail, name: string): File {
   const dir = new Directory(Paths.cache, "files", `${a.id}-${a.shownVersion}`);

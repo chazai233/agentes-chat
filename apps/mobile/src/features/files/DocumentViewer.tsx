@@ -2,8 +2,9 @@ import { type ArtifactDetail, useApi, useArtifact } from "@agenteschat/client";
 import { formatJson, highlightCode } from "@agenteschat/client/lib/code";
 import { isJsonFile } from "@agenteschat/client/lib/files";
 import { useQuery } from "@tanstack/react-query";
+import { Asset } from "expo-asset";
 import { Image } from "expo-image";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ActivityIndicator, Platform, Text as RNText, ScrollView, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -16,12 +17,12 @@ import { copyText, goBack, MONO } from "../shared/parts";
 import { useFileActions } from "./actions";
 import { type FileInfo, fileInfo } from "./logic";
 import { FileTile, useFileLine } from "./MessageFiles";
-import { fileText, useRemoteFile } from "./source";
+import { fileText, usePdfBytes, useRemoteFile } from "./source";
 import { VideoPlayer } from "./VideoPlayer";
 
 /**
  * A file opened from a message: Markdown and text drawn by the
- * app, PDF in a web view (iOS draws PDFs natively there), a video in our player, anything else as its card. Top: close,
+ * app, PDF in a web view (iOS draws PDFs natively there; Android through our pdf.js page), a video in our player, anything else as its card. Top: close,
  * Copiar texto and the "…", then the name and "Documento · 4 KB · Theo" on a row of their own. Bottom: Enviar and
  * Compartilhar; Ver no Drive in the "…".
  */
@@ -55,8 +56,7 @@ function Viewer({ id, version }: { id: string; version?: number }) {
       toast(ok ? { title: t("contextMenu.textCopied"), icon: "copy" } : { title: t("mobile.app.failed"), icon: "x" }),
     );
   };
-  // A PDF is drawn in the web view on iOS only (Android's WebView has no PDF viewer).
-  const pdf = info?.view === "pdf" && Platform.OS === "ios";
+  const pdf = info?.view === "pdf";
 
   return (
     <View style={[styles.screen, { backgroundColor: c.bg }]}>
@@ -103,8 +103,10 @@ function Viewer({ id, version }: { id: string; version?: number }) {
           </Center>
         ) : info.view === "markdown" || info.view === "text" ? (
           <TextPage detail={detail} markdown={info.view === "markdown"} json={isJsonFile(info.name, info.mime)} />
-        ) : pdf ? (
+        ) : pdf && Platform.OS === "ios" ? (
           <PdfPage detail={detail} />
+        ) : pdf && (info.size === null || info.size <= PDF_MAX_BYTES) ? (
+          <AndroidPdfPage detail={detail} info={info} />
         ) : info.view === "video" ? (
           <VideoPage detail={detail} info={info} />
         ) : info.view === "image" ? (
@@ -218,6 +220,99 @@ function PdfPage({ detail }: { detail: ArtifactDetail }) {
               <ActivityIndicator color={c.faint} />
             </Center>
           )}
+          style={styles.web}
+        />
+      ) : (
+        <Center>
+          <ActivityIndicator color={c.faint} />
+        </Center>
+      )}
+    </View>
+  );
+}
+
+/**
+ * The biggest PDF Android draws in the app: the bytes cross to the web view as text (a third larger), held twice
+ * for a moment. Past it, the file's card and Compartilhar.
+ */
+const PDF_MAX_BYTES = 40 * 1024 * 1024;
+
+// Built by scripts/pdfjs/build-viewer.mjs: pdf.js with its worker and CMaps, all inline (see its README).
+const PDF_VIEWER = require("../../../assets/pdfjs/viewer.html");
+
+/** The viewer page as a file on the phone, copied out of the app once. */
+function useViewerPage() {
+  return useQuery({
+    queryKey: ["pdf-viewer-page"] as const,
+    queryFn: async () => {
+      const asset = Asset.fromModule(PDF_VIEWER);
+      await asset.downloadAsync();
+      if (!asset.localUri) throw new Error("viewer page missing");
+      return asset.localUri;
+    },
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/**
+ * A PDF on Android, whose WebView has no PDF viewer: our pdf.js page draws it, the pages as they scroll into view,
+ * pinch to zoom. The page loads from the app's files with no network; the bytes go to it by message once it's ready.
+ * A file it can't read shows its card.
+ */
+function AndroidPdfPage({ detail, info }: { detail: ArtifactDetail; info: FileInfo }) {
+  const { t } = useTranslation();
+  const orgId = useOrgId();
+  const c = useColors();
+  const page = useViewerPage();
+  const bytes = usePdfBytes(orgId, detail, true);
+  const web = useRef<WebView<object>>(null);
+  // Counts the page's "ready"s: a page that loads again (its process restarted) gets the bytes again.
+  const [ready, setReady] = useState(0);
+  const [failed, setFailed] = useState(false);
+  const sent = useRef(false);
+
+  useEffect(() => {
+    if (ready === 0 || bytes.data === undefined || sent.current) return;
+    sent.current = true;
+    web.current?.postMessage(JSON.stringify({ type: "pdf", data: bytes.data }));
+  }, [ready, bytes.data]);
+
+  const uri = useMemo(() => {
+    if (!page.data) return null;
+    const q = new URLSearchParams({
+      bg: c.sunken,
+      muted: c.faint,
+      loading: t("common.loading"),
+      failed: t("mobile.files.loadFailed"),
+    });
+    return `${page.data}?${q.toString()}`;
+  }, [page.data, c.sunken, c.faint, t]);
+
+  if (failed || bytes.isError || page.isError) return <BigCard info={info} />;
+  return (
+    <View style={[styles.page, styles.clip, { backgroundColor: c.sunken }]}>
+      {uri ? (
+        <WebView
+          ref={web}
+          source={{ uri }}
+          originWhitelist={["file://*"]}
+          // Only the page itself: a link inside the PDF never navigates the view away.
+          onShouldStartLoadWithRequest={(r) => r.url.startsWith("file://")}
+          javaScriptEnabled
+          allowFileAccess
+          onMessage={(e) => {
+            let msg: { type?: string } | null = null;
+            try {
+              msg = JSON.parse(e.nativeEvent.data) as { type?: string };
+            } catch {
+              return;
+            }
+            if (msg?.type === "ready") {
+              sent.current = false;
+              setReady((n) => n + 1);
+            } else if (msg?.type === "error") setFailed(true);
+          }}
           style={styles.web}
         />
       ) : (
