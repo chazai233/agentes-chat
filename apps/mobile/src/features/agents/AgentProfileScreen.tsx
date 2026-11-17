@@ -72,6 +72,7 @@ import { AgentComputerCard } from "../computer/AgentComputerRow";
 import { KeptRunningList } from "../computer/KeptRunning";
 import { ConnectorIcon } from "../connectors/ConnectorIcon";
 import { chatHref } from "../links/logic";
+import { knownDmChannel } from "../new/useOpenDm";
 import { UsageQueueSheet } from "../queue/UsageQueueSheet";
 import { openRightHandSettings, RightHandMine } from "../right-hand/SettingsScreen";
 import { useConnectedById } from "../settings/hooks";
@@ -289,14 +290,21 @@ function Profile({ id }: { id: string }) {
       ],
     );
 
-  const openDm = (to: { agentId: string } | { userId: string } = { agentId: id }) =>
-    api.dms
+  const openDm = (to: { agentId: string } | { userId: string } = { agentId: id }) => {
+    // A conversation the app already lists opens at the tap; only a new one asks the server first.
+    const known = knownDmChannel(qc, orgId, to);
+    if (known) {
+      router.push(chatHref(known));
+      return Promise.resolve();
+    }
+    return api.dms
       .open(orgId, to)
       .then(({ channelId }) => {
         void qc.invalidateQueries({ queryKey: keys.dms(orgId) });
         router.push(chatHref(channelId));
       })
       .catch(failed);
+  };
 
   const open = (href: DidLine["href"]) => {
     if (!href) return;
