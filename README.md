@@ -1,6 +1,6 @@
 <p align="center"><img src="docs/baiyu/icon.png" width="112" alt="Baiyu Bot"></p>
 
-<h1 align="center">Baiyu Bot · 白羽</h1>
+<h1 align="center">Baiyu Bot · 摆鱼</h1>
 
 <p align="center">
   <a href="#中文">中文</a> · <a href="#english">English</a> ·
@@ -13,7 +13,7 @@
 
 ## 中文
 
-**Baiyu Bot（白羽）是一个安卓手机 App，用来在手机上和你的 AI 智能体团队一起工作。** 它是开源项目
+**Baiyu Bot 是一个安卓手机 App，用来在手机上和你的 AI 智能体团队一起工作。** 它是开源项目
 [agentes.chat](https://github.com/agentes-chat/agentes-chat) 手机端的一个 fork：功能来自 agentes.chat，名字、图标和
 智能体的 3D 形象是本项目自己的。
 
