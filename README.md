@@ -85,7 +85,7 @@ App 的代码在 `apps/mobile`（Expo / React Native）。本仓库的 Android �
 
 ## English
 
-**Baiyu Bot (白羽, "white feather") is an Android app for working with your team of AI agents from your phone.** It is a
+**Baiyu Bot (摆鱼) is an Android app for working with your team of AI agents from your phone.** It is a
 fork of the phone app of the open-source project [agentes.chat](https://github.com/agentes-chat/agentes-chat): the
 features are agentes.chat's; the name, the icon and the agents' 3D look are this project's own.
 
