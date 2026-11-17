@@ -18,6 +18,9 @@ import type { ConfigContext, ExpoConfig } from "expo/config";
  */
 const variant = process.env.APP_VARIANT ?? "production";
 const suffix = variant === "production" ? "" : `.${variant}`;
+// A fork ships under its own name and package (TRADEMARKS.md: not `chat.agentes.*`): its build sets these.
+const appName = process.env.APP_NAME ?? (variant === "production" ? "agentes" : `agentes ${variant}`);
+const appId = process.env.APP_PACKAGE ?? `chat.agentes.app${suffix}`;
 const apiUrl = process.env.EXPO_PUBLIC_API_URL ?? "https://app.agentes.chat";
 // Links to this host open the app (universal links / App Links); the server publishes the matching /.well-known
 // files (apps/server/src/app-links.ts).
@@ -98,10 +101,10 @@ export const LEGACY_REDIRECTS = [
 
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
-  name: variant === "production" ? "agentes" : `agentes ${variant}`,
+  name: appName,
   slug: "agentes",
   scheme: "agenteschat",
-  version: "0.1.0",
+  version: process.env.APP_VERSION ?? "0.1.0",
   // Upright everywhere (the plugin below); only the agent's screen, in control, lies down (`useSideways`).
   orientation: "default",
   // The icon the app ships with (ADR 0179); the others a person may pick are added by ./plugins/with-app-icons.
@@ -109,7 +112,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   icon: `${ICONS}/night/ios.png`,
   userInterfaceStyle: "automatic",
   ios: {
-    bundleIdentifier: `chat.agentes.app${suffix}`,
+    bundleIdentifier: appId,
     ...(process.env.APPLE_TEAM_ID ? { appleTeamId: process.env.APPLE_TEAM_ID } : {}),
     ...(process.env.IOS_BUILD_NUMBER ? { buildNumber: process.env.IOS_BUILD_NUMBER } : {}),
     // Light, dark and tinted (iOS 18).
@@ -124,7 +127,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     config: { usesNonExemptEncryption: false },
   },
   android: {
-    package: `chat.agentes.app${suffix}`,
+    package: appId,
     // Firebase's config comes from the build's environment, so the public repo carries none and a self-built app
     // brings its own Firebase project.
     ...(process.env.GOOGLE_SERVICES_JSON ? { googleServicesFile: process.env.GOOGLE_SERVICES_JSON } : {}),
@@ -135,7 +138,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       foregroundImage: `${ICONS}/night/android-foreground.png`,
       backgroundImage: `${ICONS}/night/android-background.png`,
       monochromeImage: `${ICONS}/night/android-monochrome.png`,
-      backgroundColor: "#03101f",
+      backgroundColor: "#0e3a34",
     },
     predictiveBackGestureEnabled: false,
     // Never read the phone's photos or play in the background: the image picker is Android's photo picker, Salvar em
@@ -208,7 +211,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       "expo-notifications",
       {
         icon: "./assets/images/notification-icon.png",
-        color: "#0063d1",
+        color: "#1e6054",
       },
     ],
     // Android release builds signed with the upload key from the environment (the Android build workflow).

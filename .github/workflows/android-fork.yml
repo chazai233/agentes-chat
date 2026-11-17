@@ -26,6 +26,9 @@ jobs:
     timeout-minutes: 120
     env:
       APP_VARIANT: preview
+      # This fork's own name and package (TRADEMARKS.md asks a public fork for both).
+      APP_NAME: Baiyu Bot
+      APP_PACKAGE: bot.baiyu.app
     steps:
       # Same reason as android.yml: free disk and add swap so the C++ compiles don't take the runner down.
       - name: Disk and swap
@@ -49,8 +52,16 @@ jobs:
           distribution: temurin
           java-version: 17
       - run: bun install --frozen-lockfile
-      - name: Version code
-        run: echo "ANDROID_VERSION_CODE=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+      # apps/mobile/RELEASE names the version this commit is (v1.2.3). A version with no release yet is published;
+      # any other build stays a draft.
+      - name: Version
+        run: |
+          echo "ANDROID_VERSION_CODE=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          rel="$(tr -d '[:space:]' < apps/mobile/RELEASE 2>/dev/null || true)"
+          if [[ "$rel" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "RELEASE_TAG=$rel" >> "$GITHUB_ENV"
+            echo "APP_VERSION=${rel#v}" >> "$GITHUB_ENV"
+          fi
 
       # The signing key: the repository's secrets when set; otherwise one kept in the Actions cache, made on the
       # first run. Neither ever enters the repo.
@@ -113,11 +124,11 @@ jobs:
             exit 0
           fi
           printf '%s' "$GOOGLE_SERVICES_BASE64" | base64 -d > "$RUNNER_TEMP/google-services.json"
-          if jq -e '.client[]? | select(.client_info.android_client_info.package_name == "chat.agentes.app.preview")' \
+          if jq -e '.client[]? | select(.client_info.android_client_info.package_name == env.APP_PACKAGE)' \
             "$RUNNER_TEMP/google-services.json" > /dev/null; then
             echo "GOOGLE_SERVICES_JSON=$RUNNER_TEMP/google-services.json" >> "$GITHUB_ENV"
           else
-            echo "::warning::google-services.json has no app chat.agentes.app.preview: this build gets no push."
+            echo "::warning::google-services.json has no app $APP_PACKAGE: this build gets no push."
           fi
       - name: Native project
         working-directory: apps/mobile
@@ -130,7 +141,7 @@ jobs:
       - name: Name the APK
         run: |
           apk=$(ls apps/mobile/android/app/build/outputs/apk/release/*.apk | head -1)
-          out="$RUNNER_TEMP/agentes-android-arm64-build${ANDROID_VERSION_CODE}.apk"
+          out="$RUNNER_TEMP/baiyu-bot-${RELEASE_TAG:-build${ANDROID_VERSION_CODE}}-android-arm64.apk"
           cp "$apk" "$out"
           echo "APK_PATH=$out" >> "$GITHUB_ENV"
           ls -la "$out"
@@ -141,14 +152,19 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
-      - name: Draft release
+      - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="android-build-${ANDROID_VERSION_CODE}"
-          gh release create "$tag" "$APK_PATH" --draft --target "$GITHUB_SHA" \
-            --title "Android APK (build ${ANDROID_VERSION_CODE})" \
-            --notes "arm64 APK built from ${GITHUB_SHA} by the fork's Android workflow. Based on agentes.chat by Codari Global, LLC (AGPL-3.0)."
+          credit="Baiyu Bot is a fork of agentes.chat. Based on agentes.chat by Codari Global, LLC (AGPL-3.0); source: https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}"
+          if [ -n "${RELEASE_TAG:-}" ] && ! gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            { cat apps/mobile/RELEASE_NOTES.md 2> /dev/null || true; printf '\n%s\n' "$credit"; } > "$RUNNER_TEMP/notes.md"
+            gh release create "$RELEASE_TAG" "$APK_PATH" --target "$GITHUB_SHA" \
+              --title "Baiyu Bot ${RELEASE_TAG}" --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            gh release create "android-build-${ANDROID_VERSION_CODE}" "$APK_PATH" --draft --target "$GITHUB_SHA" \
+              --title "Android APK (build ${ANDROID_VERSION_CODE})" --notes "$credit"
+          fi
       - name: Remove the key copies
         if: always()
         run: rm -f "$RUNNER_TEMP/upload.keystore" "$RUNNER_TEMP/google-services.json"
