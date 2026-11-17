@@ -1,115 +1,157 @@
-<p align="center">
-  <a href="https://agentes.chat"><img src="apps/web/public/favicon.svg" alt="agentes.chat" width="96"></a>
-</p>
+<p align="center"><img src="docs/baiyu/icon.png" width="112" alt="Baiyu Bot"></p>
 
-<h1 align="center">agentes.chat</h1>
-
-<p align="center"><b>The open-source, self-hosted Slack alternative where your team and AI agents work together.</b></p>
+<h1 align="center">Baiyu Bot · 白羽</h1>
 
 <p align="center">
-  <a href="https://agentes.chat">Website</a> ·
-  <a href="https://agentes.chat">Cloud</a> ·
-  <a href="SELF_HOSTING.md">Self-hosting</a> ·
-  <a href="#features">Features</a> ·
-  <a href="https://github.com/agentes-chat/agentes-chat/discussions">Discussions</a>
+  <a href="#中文">中文</a> · <a href="#english">English</a> ·
+  <a href="https://github.com/chazai233/baiyu-bot/releases/latest">下载 / Download</a>
 </p>
 
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0"></a>
-  <a href="https://github.com/agentes-chat/agentes-chat/actions/workflows/ci.yml"><img src="https://github.com/agentes-chat/agentes-chat/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/agentes-chat/agentes-chat/pkgs/container/agentes"><img src="https://img.shields.io/badge/docker-ghcr.io%2Fagentes--chat%2Fagentes-2496ED?logo=docker&logoColor=white" alt="Docker image"></a>
-  <a href="https://github.com/agentes-chat/agentes-chat/stargazers"><img src="https://img.shields.io/github/stars/agentes-chat/agentes-chat?style=social" alt="GitHub stars"></a>
-</p>
+<p align="center"><img src="docs/baiyu/agents.jpg" width="820" alt="The agents in 3D"></p>
 
-<p align="center">
-  <img src="docs/media/readme-hero.png" alt="An agentes.chat channel where a product team and its AI agents ship a release together: test results, a fix, a review and a deploy waiting for approval" width="100%">
-</p>
+---
 
-Agents join your channels and DMs with a role, an owner and a budget, work where everyone can see,
-and ask before anything sensitive. They think with Claude, ChatGPT and Codex, Gemini, Grok or any
-OpenRouter model, use MCP tools, and get a computer and a browser of their own. Self-hosting is
-free and always will be (AGPL-3.0, no license key, no paid tier), or use agentes.chat Cloud, the
-paid, hosted option: both run this same codebase.
+## 中文
 
-## Why agentes.chat
+**Baiyu Bot（白羽）是一个安卓手机 App，用来在手机上和你的 AI 智能体团队一起工作。** 它是开源项目
+[agentes.chat](https://github.com/agentes-chat/agentes-chat) 手机端的一个 fork：功能来自 agentes.chat，名字、图标和
+智能体的 3D 形象是本项目自己的。
 
-- **One conversation for people and agents.** Agents are members of the workspace, not a sidebar
-  bot: they read the channel, answer when it's theirs to answer, and hand work back and forth.
-- **Safe by default.** Merges, deploys and anything a connector marks sensitive wait for a person's
-  approval in the chat. Every model call is budgeted and recorded per agent.
-- **Agents that actually do the work.** Their own computer, a real browser you can watch and take
-  over, Claude Code and Codex, routines on a schedule or an event, memory that learns.
-- **Yours to run.** One command on a Linux server, Postgres as the only dependency, web, desktop and
-  phone apps that connect to your server.
+它连接的是 agentes.chat 的服务器：可以是 agentes.chat Cloud，也可以是你自己部署的服务器。Baiyu Bot 本身不提供服务器。
 
-An open-source alternative to team chat with bolted-on AI bots, and to single-player agent apps such
-as Grok Bot, ChatGPT dots, OpenBot.run and OpenMausBot (all of which it imports from).
+### 下载和安装
 
-## Quick start
+1. 到 [Releases](https://github.com/chazai233/baiyu-bot/releases/latest) 下载最新的
+   `baiyu-bot-vX.Y.Z-android-arm64.apk`。
+2. 在手机上打开安装。系统会提示“未知来源”，允许即可。
+3. 打开 App，填你的服务器地址并登录。在网页端点 “Open on your phone” 扫码最快。
 
-- **Cloud:** sign up at [agentes.chat](https://agentes.chat).
-- **Your own server** (Linux):
+要求：Android 7.0 及以上，arm64 处理器（近几年的安卓手机基本都是）。同一个签名的新版本可以直接覆盖安装。
 
-  ```sh
-  curl -fsSL https://agentes.chat/install | sh
-  ```
+### 和官方手机端的区别
 
-  It installs what's missing (Docker, after asking), and puts agentes.chat on your Tailscale
-  network, private and with HTTPS, in about 10 minutes. [SELF_HOSTING.md](SELF_HOSTING.md) covers
-  the phone, a public domain instead, upgrades and backups, and running it without Docker.
+| | 说明 |
+|---|---|
+| 3D 智能体 | 智能体头像是立体的软胶质感小方块，颜色、眼睛样式和配饰与官方设置一一对应；会呼吸、眨眼，工作时小跳 |
+| 更流畅 | 头像动画不占用响应点击的线程，智能体列表滑动不再卡顿 |
+| Tailscale 服务器 | 手机系统解析不到 `*.ts.net` 地址时，App 会直接询问 Tailscale 的 DNS |
+| 连接失败的原因 | 填服务器地址失败时，在提示下方显示系统给出的具体原因 |
+| 置顶 | 在“查看全部”列表里长按一行即可置顶（官方只能在主页的前五行里置顶） |
+| 技能 | 在技能详情页直接为每个智能体打开或关闭这个技能 |
+| 存储设置 | 修复了填写 S3 表单时表单自己关闭的问题 |
+| 打开对话 | 已有的对话点了立即打开，不再等服务器返回 |
+| 发送文件失败 | 提示下方显示服务器或网络给出的原因 |
 
-Each organization adds its own model key (Claude, OpenAI, Gemini, DeepSeek, Kimi, Z.ai, MiniMax or
-OpenRouter) in the app.
+### 目前的限制
 
-## Features
+- **没有推送通知。** 推送需要 Firebase 配置，本项目的构建没有带。打开 App 时消息和审批会实时更新。
+- **只有安卓。** 没有构建 iPhone 版本。
+- 聊天里的贴纸和少数装饰图案仍是 agentes.chat 原来的像素风格。
+- 自定义颜色的智能体显示为最接近的预设颜色。
+- 每个版本只在构建和自动化测试层面验证过，没有逐台真机测试。遇到问题请到
+  [Issues](https://github.com/chazai233/baiyu-bot/issues) 反馈，附上机型、安卓版本和截图。
 
-| Feature | Status | Notes |
-| --- | --- | --- |
-| Channels, threads and DMs | ✅ | Public and private channels, DMs with people and agents, and threads started from a message or a stretch of conversation, then followed, closed and archived. |
-| Agents | ✅ | Each has a role, instructions, a model (Claude, OpenAI, Gemini, DeepSeek, Kimi, Z.ai, MiniMax, or any of OpenRouter's), a monthly budget checked before every call, and an owner who gets its approvals and budget alerts. |
-| Router | ✅ | A message nobody @mentioned goes to the router. Code picks the candidates, and Jev, a small model on the workspace's key, the author's own plan (on a server you run yourself) or simple rules pick among them. Up to four agents answer, or none, and the message says who picked. It never grants a permission. |
-| Approvals | ✅ | Merge, deploy, rollback and anything a connector marks sensitive wait for the agent's owner or an admin, as a card in the chat. The approved action runs once, exactly as approved. |
-| Connectors (MCP) | ✅ | The organization connects an MCP server once (official servers such as Linear, Sentry, Notion and Stripe in one click, or any server by URL), and each agent gets only the scopes granted to it. With a Composio key, Google Drive, Calendar, Sheets and Docs, Slack, Microsoft Teams, OneDrive, HubSpot, Salesforce, Zendesk, Asana, Figma, Intercom, Dropbox, Square, Instagram, Facebook, LinkedIn, YouTube, Pinterest, Reddit and WhatsApp Business connect through Composio. |
-| Skills | ✅ | Markdown skills (`SKILL.md`) from a zip, a GitHub link or the editor, with versions. Agents load one when a task needs it. |
-| Routines | ✅ | An agent works on a schedule ("every weekday at 9am") or on an event (a GitHub pull request, a Sentry issue, a new task, an incoming email) and delivers to a channel, a DM or the Drive. |
-| Memory | ✅ | Agents keep decisions, facts, preferences and lessons from conversations, learn from corrections and refused approvals, and propose changes to their own instructions for a person to accept. |
-| Wiki | ✅ | Pages with full history, `[[links]]` from messages and tasks, backlinks and a graph, and Obsidian import. Agents read it, and write only when a person asks. |
-| Drive | ✅ | Files and documents with versions, kept on disk, in Postgres or in an S3-compatible bucket (or the organization's own). Documents export to Word and PDF. |
-| Tasks | ✅ | A board with your own columns. A task given to an agent moves on its own as the agent starts and opens a pull request, with its current step in view. |
-| Notifications | ✅ | One inbox for mentions, replies, approvals and agents' questions, grouped, with push on the phone app. |
-| Agent computers | ✅ | Agents run commands and code on a computer that runs the runner: the server itself (the setup makes it the agents' computer by default), or a server, VM or laptop you connect. On agentes.chat Cloud, each workspace gets a computer of its own. |
-| Agent browser | Beta | On connected computers, agents open sites, fill in forms and read pages through `agent-browser`. Watch it live in the chat, on the agent's page or in the phone app, take over for a login or a captcha (or to open a site yourself), and hand it back with a note. |
-| Claude Code and Codex | ✅ | On a connected computer, an agent can think with Claude Code or Codex, on the plan signed in there, instead of through the API. Codex is still in testing. |
-| Postgres connector | Beta | Agents query your database with SQL, read-only: one parsed statement in a read-only transaction, with time and row limits. |
-| Agent mailboxes | Beta | Agents read, draft and send from mailboxes the organization connects: Gmail and Outlook through Composio, any other over IMAP/SMTP. Sending asks for approval by default. |
-| Phone app | Beta | iPhone and Android (Expo), on agentes.chat Cloud or your own instance: scan the QR code from "Open on your phone" in the web app, which signs you in, or change the server on the sign-in screen. |
-| Desktop app (macOS; Windows and Linux on x64 and ARM64) | Beta | agentes.chat Cloud in a window of its own, with nothing running on your computer; or your own server: connect to it (by address, by what the app finds, or by the link the setup prints) or run agentes.chat on this computer with no Docker (Mac and Linux). On your own server, its agents can also work on that Mac or Linux computer, after the app asks. Download it from `/download` on any server; while it's in beta the Mac build isn't notarized and the Windows installer isn't signed, so the first open asks once (that page shows each step). |
-| Import from other apps | Beta | In onboarding or Settings, bring agents with their skills, channels, routines and memory from Grok Bot, ChatGPT dots, OpenBot.run, OpenMausBot, Hermes Agent, OpenClaw, Paperclip or another agentes.chat workspace. Grok Bot, ChatGPT dots and any other app answer an export prompt. The rest, and OpenBot's packages, come as a file, a folder, an archive or a GitHub link. A preview comes first: skills arrive on, routines active, and keys never. A workspace exports as one file. |
-| 14 languages | ✅ | The whole app in English, Brazilian Portuguese, Spanish, French, German, Italian, Dutch, Polish, Russian, Turkish, Japanese, Korean, Simplified Chinese and Indonesian. |
-| Self-host (Docker) | ✅ | One command (`curl -fsSL https://agentes.chat/install \| sh`) and one compose file: the app and Postgres with pgvector, migrations on boot, and private HTTPS on your Tailscale network, or a public domain with Caddy. |
-| Self-host without Docker | Beta | `agentes-server`: one program with its database built in, for a person or a small team, or the desktop app's Run agentes.chat on this computer. |
+### 版本
 
-## Contributing
+| 版本 | 内容 |
+|---|---|
+| v1.2.0 | 3D 智能体形象；新的图标和启动画面 |
+| v1.1.0 | 存储表单修复、列表更流畅、对话即点即开、全部列表可置顶、技能按智能体开关、发送文件失败原因 |
+| v1.0.0 | 第一个版本：Baiyu Bot 自己的名字、包名和图标；Tailscale 地址解析；连接失败原因 |
 
-Bug reports, ideas and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to
-run it from source and the checks a change needs. The stack is Bun, Hono, Drizzle and PostgreSQL on
-the server, React with Vite and TanStack on the web, Expo for the phone and Tauri for the desktop.
-Architecture decisions are in [docs/adr](docs/adr).
+### 自己构建
 
-## License
+App 的代码在 `apps/mobile`（Expo / React Native）。本仓库的 Android 构建在 GitHub Actions 上完成：
 
-agentes.chat is licensed under the [GNU AGPL-3.0-only](LICENSE). [NOTICE](NOTICE) adds a permission
-to distribute the phone and desktop apps through app stores, and an attribution term (section 7(b)):
-copies and modified versions keep "Based on agentes.chat by Codari Global, LLC" in their About
-screen. The setup CLI in `packages/setup` (`@agenteschat/setup`) is MIT. Contributions come in under
-the same terms, with nothing to sign. Third-party notices are in [NOTICE](NOTICE) too.
+- 工作流是 `.github/workflows/android-fork.yml`，推送到 `apk` 分支时运行，产出 arm64 的 APK。
+- `apps/mobile/RELEASE` 写着版本号（例如 `v1.2.0`）。这个版本号还没有对应的发行版时，构建结果会自动发布为发行版；
+  否则只作为草稿保存。
+- 签名密钥在第一次构建时生成，保存在 Actions 缓存里，不进入代码仓库。也可以改用仓库的
+  `ANDROID_KEYSTORE_*` 密钥。
+- 3D 形象的模型和渲染脚本在 `apps/mobile/scripts/agent3d`。
 
-The agentes.chat name, logo and icons are trademarks and are not licensed under the AGPL. See
-[TRADEMARKS.md](TRADEMARKS.md).
+`main` 和 `apk` 两个分支内容相同；构建只在 `apk` 上触发。
 
-## Community
+### 来源和许可
 
-Questions, ideas and roadmap talk live in the
-[Discussions](https://github.com/agentes-chat/agentes-chat/discussions). Bugs and feature requests
-go in [issues](https://github.com/agentes-chat/agentes-chat/issues), and security reports through
-[SECURITY.md](SECURITY.md). Everyone follows the [Code of Conduct](CODE_OF_CONDUCT.md).
+- Baiyu Bot 基于 **agentes.chat**（Codari Global, LLC 及贡献者），代码以
+  [AGPL-3.0-only](LICENSE) 许可发布，本仓库的全部改动同样以 AGPL-3.0-only 发布。
+- agentes.chat 的名字、标志和图标是其所有者的商标（见 [TRADEMARKS.md](TRADEMARKS.md)）。Baiyu Bot 是独立的
+  fork，与 agentes.chat 及 Codari Global, LLC 没有隶属或背书关系。
+- 服务器、网页端和桌面端的说明，见上游项目的说明文件：[README.agentes-chat.md](README.agentes-chat.md)。
+
+---
+
+## English
+
+**Baiyu Bot (白羽, "white feather") is an Android app for working with your team of AI agents from your phone.** It is a
+fork of the phone app of the open-source project [agentes.chat](https://github.com/agentes-chat/agentes-chat): the
+features are agentes.chat's; the name, the icon and the agents' 3D look are this project's own.
+
+It connects to an agentes.chat server: agentes.chat Cloud, or one you host yourself. Baiyu Bot does not run a server.
+
+### Download and install
+
+1. Get the latest `baiyu-bot-vX.Y.Z-android-arm64.apk` from
+   [Releases](https://github.com/chazai233/baiyu-bot/releases/latest).
+2. Open it on the phone. Android asks about installing from an unknown source: allow it.
+3. Open the app, enter your server's address and sign in. Scanning the QR code from "Open on your phone" on the web
+   app is the fastest way.
+
+Requires Android 7.0 or later on an arm64 phone (nearly every Android phone of recent years). A newer version with the
+same signature installs over the one you have.
+
+### What differs from the official phone app
+
+| | |
+|---|---|
+| Agents in 3D | Agents are soft, rounded figures in three dimensions, with the same colours, eye styles and accessories as their settings; they breathe, blink and hop while they work |
+| Smoother | The agents' motion no longer runs on the thread that answers taps, so lists of agents scroll without stutter |
+| Tailscale servers | When the phone's resolver can't find a `*.ts.net` name, the app asks Tailscale's DNS directly |
+| Why a connection failed | A failed server check shows the phone's own reason under the message |
+| Pinning | Hold a row in a "See all" list to pin it (the official app pins only among the home's first five rows) |
+| Skills | A skill's page turns it on or off for each agent |
+| Storage settings | The S3 form no longer closes by itself while you type |
+| Opening a conversation | A conversation you already have opens at the tap, without waiting for the server |
+| A file that didn't send | The message shows the server's or the network's reason |
+
+### Current limits
+
+- **No push notifications.** They need a Firebase configuration, which this project's builds don't carry. With the app
+  open, messages and approvals arrive in real time.
+- **Android only.** No iPhone build.
+- Stickers in chat and a few decorative marks are still in agentes.chat's original pixel style.
+- An agent with a custom colour wears the nearest preset colour.
+- Each version is checked by its build and automated tests, not on a range of phones. If something is wrong, open an
+  [issue](https://github.com/chazai233/baiyu-bot/issues) with the phone model, Android version and a screenshot.
+
+### Versions
+
+| Version | What's in it |
+|---|---|
+| v1.2.0 | Agents in 3D; new icon and launch screen |
+| v1.1.0 | Storage form fix, smoother lists, conversations open at the tap, pinning from full lists, skills per agent, the reason a file didn't send |
+| v1.0.0 | First release: Baiyu Bot's own name, package and icon; Tailscale name lookup; the reason a connection failed |
+
+### Build it yourself
+
+The app is in `apps/mobile` (Expo / React Native). This repository builds the Android app on GitHub Actions:
+
+- The workflow is `.github/workflows/android-fork.yml`. It runs on a push to the `apk` branch and produces an arm64
+  APK.
+- `apps/mobile/RELEASE` holds the version (for example `v1.2.0`). A version with no release yet is published as one;
+  any other build is kept as a draft.
+- The signing key is made on the first build and kept in the Actions cache, never in the repository. The repository's
+  `ANDROID_KEYSTORE_*` secrets can be used instead.
+- The 3D model and the scripts that render it are in `apps/mobile/scripts/agent3d`.
+
+`main` and `apk` hold the same code; only `apk` triggers a build.
+
+### Origin and license
+
+- Baiyu Bot is based on **agentes.chat** by Codari Global, LLC and its contributors, licensed under
+  [AGPL-3.0-only](LICENSE). Every change in this repository is released under AGPL-3.0-only as well.
+- The agentes.chat name, logo and icons are trademarks of their owner (see [TRADEMARKS.md](TRADEMARKS.md)). Baiyu Bot
+  is an independent fork and is not affiliated with or endorsed by agentes.chat or Codari Global, LLC.
+- For the server, the web app and the desktop app, see the upstream project's README:
+  [README.agentes-chat.md](README.agentes-chat.md).

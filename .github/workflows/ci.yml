@@ -20,11 +20,10 @@ name: CI
 #   CI_RUNNER_ARM    the arm64 image, built natively
 # The tests use the cores the runner has, so a smaller runner is slower, not broken. Everything else runs
 # on x64: on ARM the backend shards took 2.5x as long (603 and 667 s against 229 and 275 s, 2026-10-26).
+# In this fork (Baiyu Bot) it no longer runs on a push: its build and publish jobs push images to agentes.chat's own
+# registry, which a fork can't and shouldn't. It still runs on a pull request and by hand.
 on:
   pull_request:
-  push:
-    branches: [main]
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       scope:
