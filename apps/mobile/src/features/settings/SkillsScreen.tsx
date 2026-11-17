@@ -217,7 +217,6 @@ export function SkillScreen({ id }: { id: string }) {
   const usage = useSkillUsage(orgId, admin);
   const s = skill.data;
   const users = usage.get(id) ?? [];
-  const agents = useAgents(orgId, admin);
   const via = s ? skillSourceViaText(t, s) : null;
   const subtitle = s
     ? [
@@ -290,31 +289,6 @@ export function SkillScreen({ id }: { id: string }) {
           ) : null}
           {admin ? <SourceUpdate skill={s} /> : null}
           {admin ? <AgentImprove skill={s} /> : null}
-          {admin && (agents.data?.length ?? 0) > 0 ? (
-            <>
-              {/* Which agents have it on, as the web's agent page: an agent reads only the skills on for it. */}
-              <GroupedHeader>{t("skills.usedBy", { count: users.length })}</GroupedHeader>
-              <GroupedList>
-                {(agents.data ?? []).map((a) => {
-                  const on = users.some((u) => u.id === a.id);
-                  return (
-                    <GroupedRow
-                      key={a.id}
-                      label={a.name}
-                      toggle={on}
-                      disabled={action.isPending}
-                      onPress={() =>
-                        action.mutate(
-                          { type: "assign", agentId: a.id, skills: [{ skillId: s.id, enabled: !on }] },
-                          { onError: failed },
-                        )
-                      }
-                    />
-                  );
-                })}
-              </GroupedList>
-            </>
-          ) : null}
           <Gap />
           <GroupedList>
             <View style={styles.page}>

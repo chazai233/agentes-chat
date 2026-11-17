@@ -1,6 +1,5 @@
 import {
   type Agent,
-  ApiError,
   type ArtifactDetail,
   type ArtifactRef,
   type BrowserHandoff,
@@ -1163,9 +1162,7 @@ function Chat({
       const after = (f: PendingFile): PendingFile["state"] => (failed.has(f.id) ? "failed" : "waiting");
       setPending((now) => now.map((f) => ({ ...f, state: after(f) })));
       if (text) setCaptionBack({ text, at: Date.now() });
-      // What actually failed (the server's status and code, or the network's own words), so it can be fixed.
-      const first = results.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
-      toast({ title: t("mobile.chat.uploadFailed"), subtitle: uploadFailure(first?.reason), icon: "x" });
+      toast({ title: t("mobile.chat.uploadFailed"), icon: "x" });
       return;
     }
     const refs = results.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
@@ -2808,11 +2805,3 @@ const styles = StyleSheet.create({
   faces: { flexDirection: "row" },
   round: { borderRadius: 12 },
 });
-
-/** One line on why an upload failed: `HTTP 403 bad_origin: …` from the server, or the platform's network error. */
-function uploadFailure(reason: unknown): string | undefined {
-  if (!reason) return undefined;
-  if (reason instanceof ApiError) return `HTTP ${reason.status} ${reason.code}: ${reason.message}`;
-  if (reason instanceof Error) return reason.message;
-  return String(reason);
-}

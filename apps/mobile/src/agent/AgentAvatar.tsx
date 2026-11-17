@@ -10,7 +10,7 @@ import { avatarSkyCell, avatarSkyCells, avatarSkyTones } from "@agenteschat/ui/s
 import { Canvas, createPicture, Picture } from "@shopify/react-native-skia";
 import { memo, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { Platform, StyleSheet, View } from "react-native";
+import { StyleSheet, View } from "react-native";
 import { useReducedMotion, useTheme } from "@/ui/theme";
 import { useFrameTime } from "./live";
 import type { AgentLookInput } from "./looks";
@@ -105,13 +105,6 @@ export function agentFrame(
   return compile(rec.commands);
 }
 
-/**
- * How often a living agent is redrawn. Each frame is drawn in JavaScript (the engine, then a Skia picture), once per
- * agent on screen: at the clock's full 25 a second, a list of agents keeps an Android phone's JavaScript thread busy
- * enough that scrolling stutters and a tap waits. Pixel art reads the same at 8, at a third of the work.
- */
-const LIVE_FPS = Platform.OS === "android" ? 8 : undefined;
-
 function AgentAvatarView({
   agent,
   size,
@@ -130,7 +123,7 @@ function AgentAvatarView({
   const { t: tr } = useTranslation();
   const { color, eyes, accessory, id } = agent;
   const seed = useMemo(() => seedOf(id ?? `${color}:${eyes}:${accessory ?? ""}`), [id, color, eyes, accessory]);
-  const t = useFrameTime(live && !reduced, STILL_T, LIVE_FPS);
+  const t = useFrameTime(live && !reduced, STILL_T);
   const picture = useMemo(() => {
     const frame = agentFrame(
       { color, eyes, accessory },

@@ -7,17 +7,14 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useOrg } from "@/providers/org";
 import { Text } from "@/ui";
 import { router } from "@/ui/navigation";
-import { useCategoryMenus } from "../categories/menus";
 import { mayCreate } from "../new/logic";
 import { FirstUse, LoadFailed } from "../shared/FirstUse";
 import { useColors, useDirectory, useOrgId, usePullRefresh } from "../shared/hooks";
 import { FocusLive, PushedHeader } from "../shared/parts";
 import { useConversations, useWorkingNow } from "../shared/queries";
-import { SheetHostProvider } from "../shared/SheetHost";
 import { useHidesQuietGeneral } from "./ChatsScreen";
 import { ConversationRowView } from "./ConversationRowView";
 import { type ConversationRow, type ListKind, rightHandPin, rowsOfKind, withoutQuietGeneral } from "./logic";
-import { usePins } from "./pins";
 import { useAgentRowStates } from "./useHomeNow";
 import { useWaitingItems } from "./useWaitingItems";
 
@@ -29,26 +26,9 @@ const LIVE_ROWS = 8;
  * people), by latest activity, in Conversas' rows (an agent's says it waits on you, or what it is doing). A personal
  * workspace (ADR 0159) titles its channels as group conversations and, as on the home, leaves a quiet #general out
  * while its person is alone in it.
- *
- * A row held offers "Pin to top" as on the home: the home shows only a section's first rows, so this list is where
- * anything further down is pinned (and so brought onto the home).
  */
-export function ConversationListScreen(props: { kind: ListKind; categoryId?: string }) {
-  return (
-    <SheetHostProvider>
-      <ConversationList {...props} />
-    </SheetHostProvider>
-  );
-}
-
-function ConversationList({ kind, categoryId }: { kind: ListKind; categoryId?: string }) {
+export function ConversationListScreen({ kind, categoryId }: { kind: ListKind; categoryId?: string }) {
   const { t } = useTranslation();
-  const menus = useCategoryMenus();
-  const pins = usePins();
-  const pinnedRow = (r: ConversationRow) =>
-    r.kind === "channel"
-      ? pins.isPinned("channels", r.channelId)
-      : r.kind === "dm" && pins.isPinned(r.with.type === "agent" ? "agents" : "people", r.with.id);
   const c = useColors();
   const insets = useSafeAreaInsets();
   const list = useConversations();
@@ -119,10 +99,6 @@ function ConversationList({ kind, categoryId }: { kind: ListKind; categoryId?: s
                 divider={i > 0}
                 live={i < LIVE_ROWS}
                 agent={agentStates.get(r.key)}
-                pinned={pins.chosen && pinnedRow(r)}
-                onHold={menus.openRowMenu}
-                holdLabel={t("sidebarPins.pin")}
-                holdActions={menus.rowActionsOf}
               />
             ))
           )}
