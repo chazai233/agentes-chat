@@ -14,7 +14,7 @@ test("PDFs, Office files, tables and ZIPs open on the app's preview pages; too b
   expect(viewer).toContain("info.size <= PREVIEW_MAX_BYTES");
   // The page stays on itself; a link in the file never navigates it away.
   expect(viewer).toContain("onShouldStartLoadWithRequest={(r) => r.url.startsWith(page.data as string)}");
-  expect(viewer).toContain('else if (msg?.type === "error") setFailed(true);');
+  expect(viewer).toContain('else if (msg?.type === "error") setFailed(`page: ${msg.message ?? ""}`);');
   expect(viewer).toContain("<AudioPage detail={detail} info={info} />");
 });
 

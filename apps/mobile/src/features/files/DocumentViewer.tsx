@@ -303,7 +303,8 @@ function PreviewPage({
   const web = useRef<WebView<object>>(null);
   // Counts the page's "ready"s: a page that loads again (its process restarted) gets the bytes again.
   const [ready, setReady] = useState(0);
-  const [failed, setFailed] = useState(false);
+  // Why the file shows its card instead: the page's own error, or the web view's.
+  const [failed, setFailed] = useState<string | null>(null);
   const sent = useRef(false);
 
   useEffect(() => {
@@ -330,7 +331,11 @@ function PreviewPage({
     return `${page.data}?${q.toString()}`;
   }, [page.data, c.sunken, c.ink, c.faint, c.line2, c.raised, t]);
 
-  if (failed || bytes.isError || page.isError) return <BigCard info={info} />;
+  const reason =
+    failed ??
+    (bytes.isError ? `download: ${errorText(bytes.error)}` : null) ??
+    (page.isError ? `page: ${errorText(page.error)}` : null);
+  if (reason !== null) return <BigCard info={info} reason={reason} />;
   return (
     <View style={[styles.page, styles.clip, { backgroundColor: c.sunken }]}>
       {uri && page.data ? (
@@ -342,17 +347,18 @@ function PreviewPage({
           onShouldStartLoadWithRequest={(r) => r.url.startsWith(page.data as string)}
           javaScriptEnabled
           allowFileAccess
+          onError={(e) => setFailed(`view: ${e.nativeEvent.description || e.nativeEvent.code}`)}
           onMessage={(e) => {
-            let msg: { type?: string } | null = null;
+            let msg: { type?: string; message?: string } | null = null;
             try {
-              msg = JSON.parse(e.nativeEvent.data) as { type?: string };
+              msg = JSON.parse(e.nativeEvent.data) as { type?: string; message?: string };
             } catch {
               return;
             }
             if (msg?.type === "ready") {
               sent.current = false;
               setReady((n) => n + 1);
-            } else if (msg?.type === "error") setFailed(true);
+            } else if (msg?.type === "error") setFailed(`page: ${msg.message ?? ""}`);
           }}
           style={styles.web}
         />
@@ -454,9 +460,16 @@ function VideoPage({ detail, info }: { detail: ArtifactDetail; info: FileInfo })
   );
 }
 
-/** A type the app doesn't draw: its card, big, and Compartilhar opens it elsewhere. */
-function BigCard({ info }: { info: FileInfo }) {
+/** An error's words for the card's small print. */
+const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+/**
+ * A type the app doesn't draw: its card, big, and Compartilhar opens it elsewhere. A preview that failed adds why, in
+ * small print (selectable, so it can be copied into a bug report).
+ */
+function BigCard({ info, reason }: { info: FileInfo; reason?: string }) {
   const { t } = useTranslation();
+  const c = useColors();
   const line = useFileLine();
   return (
     <Center>
@@ -470,6 +483,11 @@ function BigCard({ info }: { info: FileInfo }) {
       <Text variant="small" tone="muted" style={styles.note}>
         {t("mobile.files.noPreview")}
       </Text>
+      {reason ? (
+        <RNText selectable style={[styles.reason, { color: c.faint }]}>
+          {reason}
+        </RNText>
+      ) : null}
     </Center>
   );
 }
@@ -492,6 +510,7 @@ const styles = StyleSheet.create({
   picture: { borderBottomLeftRadius: 14, borderBottomRightRadius: 14, marginBottom: 12 },
   bigName: { marginTop: 14, textAlign: "center" },
   note: { marginTop: 10, textAlign: "center" },
+  reason: { marginTop: 8, fontFamily: MONO, fontSize: 11, lineHeight: 15, textAlign: "center" },
   bar: {
     flexDirection: "row",
     gap: 10,

@@ -55,6 +55,7 @@
 
 | 版本 | 内容 |
 |---|---|
+| v1.2.5 | 预览失败时显示原因 |
 | v1.2.4 | 应用内预览 Word、Excel/CSV、PPT、ZIP、音频、SVG 和代码文件 |
 | v1.2.3 | 应用内预览 PDF：逐页加载、双指缩放、支持中文 |
 | v1.2.2 | 修复首页、动态等列表上下滑动不跟手、误触成左右滑动的问题 |
@@ -133,6 +134,7 @@ same signature installs over the one you have.
 
 | Version | What's in it |
 |---|---|
+| v1.2.5 | A failed preview says why |
 | v1.2.4 | Word, Excel/CSV, PowerPoint, ZIP, audio, SVG and code files open inside the app |
 | v1.2.3 | PDFs open inside the app: pages load as you scroll, pinch to zoom, Chinese text included |
 | v1.2.2 | Lists with swipeable rows (home, Activity) scroll with the finger again instead of sticking or opening a row |

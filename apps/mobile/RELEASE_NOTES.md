@@ -1,4 +1,9 @@
-Baiyu Bot v1.2.4 for Android (arm64, Android 7+). Installs over v1.2.3.
+Baiyu Bot v1.2.5 for Android (arm64, Android 7+). Installs over v1.2.4.
+
+- A file whose preview fails now says why, in small print under its card (the download, the page or the web view),
+  so the cause can be fixed. PDFs and Office files showed only their card on some phones.
+
+Same previews as v1.2.4:
 
 - Common files open inside the app instead of only showing their card:
   - Word (.docx): pages as in Word, pinch to zoom.
@@ -14,4 +19,4 @@ Baiyu Bot v1.2.4 for Android (arm64, Android 7+). Installs over v1.2.3.
 - Still a card, with Share to open elsewhere: old .doc and .ppt, Apple Pages/Numbers/Keynote, other archives
   (.rar, .7z, .tar.gz), and files over 40 MB.
 
-中文：常见文件都能在应用里直接预览了：Word、Excel/CSV（含中文 Excel 导出的 GBK 编码）、PPT、ZIP 目录、音频、SVG 图片和代码文件。旧版 .doc/.ppt、rar/7z 压缩包和超过 40 MB 的文件仍显示文件卡片，可用“分享”在其他应用打开。
+中文：预览失败时，文件卡片下方会显示具体原因（下载、页面或 WebView），便于定位问题。v1.2.4 的内容：常见文件都能在应用里直接预览了：Word、Excel/CSV（含中文 Excel 导出的 GBK 编码）、PPT、ZIP 目录、音频、SVG 图片和代码文件。旧版 .doc/.ppt、rar/7z 压缩包和超过 40 MB 的文件仍显示文件卡片，可用“分享”在其他应用打开。
