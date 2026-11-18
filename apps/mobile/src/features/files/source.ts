@@ -20,12 +20,30 @@ const LINK_STALE_MS = 4 * 60 * 1000;
 export interface RemoteFile {
   uri: string;
   headers: Record<string, string>;
+  /** Served by our own server (with the session), not a link signed by a storage bucket. */
+  ours?: boolean;
 }
 
 async function remote(api: ApiClient, orgId: string, id: string, version?: number): Promise<RemoteFile> {
   const { url } = await api.artifacts.download(orgId, id, version);
   const r = resolveDownloadUrl(serverUrl(), url);
-  return { uri: r.uri, headers: r.needsSession ? appHeaders(await readCookie()) : {} };
+  return { uri: r.uri, headers: r.needsSession ? appHeaders(await readCookie()) : {}, ours: r.needsSession };
+}
+
+/**
+ * Downloads a link into `file` with the app's own `fetch`. A refusal says who refused and what they said (our
+ * server's error code, or the bucket's), which the native downloader's bare status doesn't.
+ */
+async function download(r: RemoteFile, file: File): Promise<void> {
+  const res = await fetch(r.uri, { headers: r.headers, credentials: "omit" });
+  if (!res.ok) {
+    const said = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 300);
+    const from = r.ours ? "server" : new URL(r.uri).host;
+    throw new Error(`${res.status} from ${from}: ${said}`);
+  }
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  if (!file.exists) file.create();
+  file.write(bytes);
 }
 
 /** The link to show a picture or a PDF (refreshed before it expires). */
@@ -78,7 +96,7 @@ export function useFileBytes(orgId: string, a: ArtifactDetail | null, enabled: b
       if (!file.exists) {
         const r = await remote(api, orgId, art.id, art.shownVersion);
         try {
-          await File.downloadFileAsync(r.uri, file, { headers: r.headers, idempotent: true });
+          await download(r, file);
         } catch (err) {
           // A half-written copy would be read as the file next time.
           if (file.exists) file.delete();
@@ -122,8 +140,8 @@ export async function localCopy(
           headers: appHeaders(await readCookie()),
         }
       : await remote(api, orgId, a.id, a.shownVersion);
-  const done = await File.downloadFileAsync(r.uri, file, { headers: r.headers, idempotent: true });
-  return { uri: done.uri, source };
+  await download(r, file);
+  return { uri: file.uri, source };
 }
 
 /** The system share sheet with the real file (Salvar imagem, Salvar em Arquivos, other apps). */
