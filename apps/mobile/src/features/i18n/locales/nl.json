@@ -1223,6 +1223,8 @@
     "previous": "Vorige afbeelding",
     "next": "Volgende afbeelding",
     "noPreview": "Dit bestand opent niet in de app. Stuur het naar een andere app om het te openen.",
+    "rowsCut": "Alleen de eerste {{rows}} rijen worden getoond. Deel het bestand om alles te zien.",
+    "sheetEmpty": "Dit blad is leeg.",
     "video": {
       "play": "Afspelen",
       "pause": "Pauzeren",

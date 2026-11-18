@@ -1301,6 +1301,9 @@ export const featureKeysEn = {
     previous: "Previous picture",
     next: "Next picture",
     noPreview: "This file doesn't open in the app. Send it to another app to open it.",
+    /** Under a sheet on the preview page cut at that many rows, and a sheet with nothing in it. */
+    rowsCut: "Only the first {{rows}} rows are shown. Share the file to see all of it.",
+    sheetEmpty: "This sheet is empty.",
     /** The video player's controls (a message's video and the file screen). */
     video: {
       play: "Play",

@@ -1268,6 +1268,8 @@ export const featureKeysPtBR = {
     previous: "Imagem anterior",
     next: "Próxima imagem",
     noPreview: "Este arquivo não abre no app. Envie para outro app para abrir.",
+    rowsCut: "Só as primeiras {{rows}} linhas aparecem. Compartilhe o arquivo para ver tudo.",
+    sheetEmpty: "Esta planilha está vazia.",
     video: {
       play: "Tocar",
       pause: "Pausar",

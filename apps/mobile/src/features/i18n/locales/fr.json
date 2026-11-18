@@ -1297,6 +1297,8 @@
     "previous": "Image précédente",
     "next": "Image suivante",
     "noPreview": "Ce fichier ne s'ouvre pas dans l'app. Envoyez-le vers une autre app pour l'ouvrir.",
+    "rowsCut": "Seules les {{rows}} premières lignes s'affichent. Partagez le fichier pour tout voir.",
+    "sheetEmpty": "Cette feuille est vide.",
     "video": {
       "play": "Lire",
       "pause": "Pause",

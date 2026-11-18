@@ -1223,6 +1223,8 @@
     "previous": "Önceki görsel",
     "next": "Sonraki görsel",
     "noPreview": "Bu dosya uygulamada açılmıyor. Açmak için başka bir uygulamaya gönderin.",
+    "rowsCut": "Yalnızca ilk {{rows}} satır gösteriliyor. Tamamını görmek için dosyayı paylaşın.",
+    "sheetEmpty": "Bu sayfa boş.",
     "video": {
       "play": "Oynat",
       "pause": "Duraklat",

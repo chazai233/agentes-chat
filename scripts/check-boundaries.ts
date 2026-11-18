@@ -33,6 +33,13 @@ export function isPrivate(path: string): boolean {
 const NAMES_PRIVATE_PATHS = new Set(["scripts/check-boundaries.ts", "scripts/check-boundaries.test.ts", ".gitignore"]);
 
 /**
+ * The phone app's preview pages, built from third-party libraries (pdf.js, docx-preview, SheetJS, JSZip): minified
+ * code, not our prose, where names like these turn up by chance. Their sources here (scripts/pdfjs, scripts/preview)
+ * are still checked.
+ */
+const BUNDLED_PAGES = new Set(["apps/mobile/assets/pdfjs/viewer.html", "apps/mobile/assets/preview/viewer.html"]);
+
+/**
  * A planning decision id in running text: "(D46)", "D60: …", "D9–D13", "D18/D20", "D104". A slash only joins
  * two ids, so base64 like "ab/D45/x" passes. Cloudflare's D1 is a product name, after R2 in any language ("R2 und D1", "R2, D1").
  */
@@ -119,7 +126,7 @@ if (import.meta.main) {
   // Tracked files and new ones not ignored, so a file is checked before its first commit too.
   const notes: string[] = [];
   for (const path of lsFiles("--cached", "--others", "--exclude-standard")) {
-    if (isPrivate(path) || NAMES_PRIVATE_PATHS.has(path)) continue;
+    if (isPrivate(path) || NAMES_PRIVATE_PATHS.has(path) || BUNDLED_PAGES.has(path)) continue;
     const file = Bun.file(path);
     if (!(await file.exists())) continue; // deleted, not staged yet
     const text = await file.text();

@@ -7,8 +7,11 @@ import { filePath } from "@agenteschat/client/lib/message-links";
  * line ("MD", "Documento · 4 KB"), how a viewer shows each, and the name a shared copy gets.
  */
 
-/** How the app shows a file: inline picture or video, the document screen (Markdown, text, PDF), or only its card. */
-export type FileView = "image" | "video" | "markdown" | "text" | "pdf" | "other";
+/**
+ * How the app shows a file: inline picture or video, the document screen (Markdown, text, PDF, Office files and
+ * tables, a ZIP's contents, audio), or only its card.
+ */
+export type FileView = "image" | "video" | "markdown" | "text" | "pdf" | "office" | "archive" | "audio" | "other";
 
 /** The word under the name ("Imagem", "PDF", "Documento"…): `mobile.files.type.<key>`. */
 export type FileTypeKey =
@@ -38,16 +41,80 @@ export interface FileInfo {
   mime: string;
 }
 
-/** Raster types the app draws (expo-image); SVG and the rest open as a card. */
-const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/heic", "image/heif"]);
+/** Picture types the app draws (expo-image, which also draws SVG and BMP). */
+const IMAGE_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "image/heic",
+  "image/heif",
+  "image/svg+xml",
+  "image/bmp",
+]);
 /** Video types the phones play (expo-video); WebM only plays on Android, so iPhone falls back to the card. */
 const VIDEO_TYPES = new Set(["video/mp4", "video/quicktime", "video/x-m4v", "video/webm"]);
 /** Names that already say "video" while the file's details load (no jump from card to player). */
 export const VIDEO_EXT = new Set(["mp4", "mov", "m4v", "webm"]);
 /** Names that say "picture": while the details load, and when the stored type doesn't (an upload typed as bytes). */
-export const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "heic", "heif"]);
+export const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "bmp"]);
 const MARKDOWN_EXT = new Set(["md", "markdown", "mdx"]);
-const TEXT_EXT = new Set(["txt", "log", "csv", "tsv", "json", "yml", "yaml", "toml", "xml", "ini", "env"]);
+/** Plain text and source code, shown as text. */
+const TEXT_EXT = new Set([
+  ...["txt", "log", "json", "jsonl", "yml", "yaml", "toml", "xml", "ini", "env", "conf", "cfg", "properties"],
+  ...["js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "rb", "go", "rs", "java", "kt", "kts", "swift", "c", "h"],
+  ...["cc", "cpp", "hpp", "cs", "php", "lua", "r", "dart", "scala", "sh", "bash", "zsh", "ps1", "bat", "sql"],
+  ...["css", "scss", "less", "html", "htm", "vue", "svelte", "patch", "diff", "gradle", "dockerfile", "srt", "vtt"],
+]);
+/**
+ * Office files and tables, drawn by the app's preview page (`officeKindOf`). iPhones also show the older and Apple
+ * formats natively; Android shows those as their card.
+ */
+const OFFICE_EXT = new Set([
+  "docx",
+  "xlsx",
+  "xlsm",
+  "xls",
+  "ods",
+  "pptx",
+  "csv",
+  "tsv",
+  "doc",
+  "ppt",
+  "key",
+  "pages",
+  "numbers",
+]);
+const OFFICE_TYPES = new Set([
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/vnd.ms-excel",
+  "application/vnd.ms-powerpoint",
+  "application/msword",
+  "text/csv",
+  "text/tab-separated-values",
+]);
+const ARCHIVE_EXT = new Set(["zip"]);
+/** Audio the phones play (expo-video plays sound alone too). */
+const AUDIO_EXT = new Set(["mp3", "m4a", "aac", "wav", "ogg", "oga", "opus", "flac", "amr"]);
+
+/** What the preview page draws for an Office file or a table ("" for a format only iPhones show natively). */
+export type OfficeKind = "docx" | "sheet" | "csv" | "pptx" | "";
+
+export function officeKindOf(name: string, mime = ""): OfficeKind {
+  const ext = extensionOf(name);
+  if (ext === "docx" || mime.endsWith("wordprocessingml.document")) return "docx";
+  if (ext === "pptx" || mime.endsWith("presentationml.presentation")) return "pptx";
+  if (ext === "csv" || ext === "tsv" || mime === "text/csv" || mime === "text/tab-separated-values") return "csv";
+  if (
+    ["xlsx", "xlsm", "xls", "ods"].includes(ext) ||
+    mime.endsWith("spreadsheetml.sheet") ||
+    mime === "application/vnd.ms-excel"
+  )
+    return "sheet";
+  return "";
+}
 
 /** Non-file artifacts: the extension their download gets (as the server names them). */
 const KIND_EXT: Record<Exclude<ArtifactKind, "file">, string> = {
@@ -116,6 +183,10 @@ export function fileInfo(a: Pick<ArtifactDetail, "kind" | "title" | "content">):
     else if (VIDEO_TYPES.has(mime) || (untyped && VIDEO_EXT.has(ext))) view = "video";
     else if (mime === "application/pdf" || ext === "pdf") view = "pdf";
     else if (MARKDOWN_EXT.has(ext) || mime === "text/markdown") view = "markdown";
+    else if (OFFICE_EXT.has(ext) || OFFICE_TYPES.has(mime)) view = "office";
+    else if (ARCHIVE_EXT.has(ext) || mime === "application/zip" || mime === "application/x-zip-compressed")
+      view = "archive";
+    else if (AUDIO_EXT.has(ext) || mime.startsWith("audio/")) view = "audio";
     else if (TEXT_EXT.has(ext) || mime.startsWith("text/")) view = "text";
     return { name, view, type: fileType(name, mime, view), ext: extLabel(ext), size: c.size, mime };
   }

@@ -63,18 +63,18 @@ export async function fileText(api: ApiClient, orgId: string, a: ArtifactDetail)
 }
 
 /**
- * A PDF's bytes as base64, for the Android PDF page (pdf.js in a web view takes the bytes by message, so the page
- * never needs the session or the network). Downloaded into the cache once per version.
+ * A file's bytes as base64, for the app's preview pages (PDF, Office, tables, ZIP): a page in a web view takes the
+ * bytes by message, so it never needs the session or the network. Downloaded into the cache once per version.
  */
-export function usePdfBytes(orgId: string, a: ArtifactDetail | null, enabled: boolean) {
+export function useFileBytes(orgId: string, a: ArtifactDetail | null, enabled: boolean) {
   const api = useApi();
   return useQuery({
-    queryKey: ["org", orgId, "artifacts", "pdf-bytes", a?.id ?? "", a?.shownVersion ?? 0] as const,
+    queryKey: ["org", orgId, "artifacts", "bytes", a?.id ?? "", a?.shownVersion ?? 0] as const,
     queryFn: async () => {
       const art = a as ArtifactDetail;
-      const dir = new Directory(Paths.cache, "pdf", `${art.id}-${art.shownVersion}`);
+      const dir = new Directory(Paths.cache, "preview", `${art.id}-${art.shownVersion}`);
       dir.create({ intermediates: true, idempotent: true });
-      const file = new File(dir, "file.pdf");
+      const file = new File(dir, "file");
       if (!file.exists) {
         const r = await remote(api, orgId, art.id, art.shownVersion);
         try {

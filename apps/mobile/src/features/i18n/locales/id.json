@@ -1146,6 +1146,8 @@
     "previous": "Gambar sebelumnya",
     "next": "Gambar berikutnya",
     "noPreview": "File ini tidak bisa dibuka di aplikasi. Kirim ke aplikasi lain untuk membukanya.",
+    "rowsCut": "Hanya {{rows}} baris pertama yang ditampilkan. Bagikan file untuk melihat semuanya.",
+    "sheetEmpty": "Lembar ini kosong.",
     "video": {
       "play": "Putar",
       "pause": "Jeda",

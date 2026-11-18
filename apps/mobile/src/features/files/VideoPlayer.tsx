@@ -42,6 +42,10 @@ export interface VideoPlayerProps {
   onOpen?: () => void;
   /** It can't play on this device (a format it lacks): the caller shows the file's card instead. */
   onFailed?: () => void;
+  /**
+   * Sound alone (an audio file): `cover` in the middle instead of a picture, the bar always there and no full screen.
+   */
+  audio?: { cover: React.ReactNode };
 }
 
 /**
@@ -49,7 +53,15 @@ export interface VideoPlayerProps {
  * its length in a small badge (no name over the picture, as a picture has none); playing, a glass bar over its foot (play, timeline, time, sound, full screen) that a tap
  * on the picture shows or hides. The volume is the phone's own buttons.
  */
-export function VideoPlayer({ source, name, variant = "inline", width = 300, onOpen, onFailed }: VideoPlayerProps) {
+export function VideoPlayer({
+  source,
+  name,
+  variant = "inline",
+  width = 300,
+  onOpen,
+  onFailed,
+  audio,
+}: VideoPlayerProps) {
   const { t } = useTranslation();
   const c = useColors();
   const view = useRef<VideoView>(null);
@@ -70,10 +82,11 @@ export function VideoPlayer({ source, name, variant = "inline", width = 300, onO
   const wake = useCallback(() => {
     setShown(true);
     clearTimeout(hideTimer.current);
+    if (audio) return;
     hideTimer.current = setTimeout(() => {
       if (player.playing) setShown(false);
     }, IDLE_MS);
-  }, [player]);
+  }, [player, audio]);
   useEffect(
     () => () => {
       clearTimeout(hideTimer.current);
@@ -112,6 +125,7 @@ export function VideoPlayer({ source, name, variant = "inline", width = 300, onO
     else player.play();
   };
   const onPicture = () => {
+    if (audio) return;
     if (!started) toggle();
     else if (shown) setShown(false);
     else wake();
@@ -134,7 +148,13 @@ export function VideoPlayer({ source, name, variant = "inline", width = 300, onO
       : t("mobile.files.video.play");
 
   return (
-    <View style={[styles.box, inline ? [styles.inline, { width, height, borderColor: c.line2 }] : styles.screen]}>
+    <View
+      style={[
+        styles.box,
+        inline ? [styles.inline, { width, height, borderColor: c.line2 }] : styles.screen,
+        audio ? { backgroundColor: c.sunken } : null,
+      ]}
+    >
       <VideoView
         ref={view}
         player={player}
@@ -142,8 +162,13 @@ export function VideoPlayer({ source, name, variant = "inline", width = 300, onO
         contentFit="contain"
         fullscreenOptions={{ enable: true }}
         allowsPictureInPicture={false}
-        style={StyleSheet.absoluteFill}
+        style={[StyleSheet.absoluteFill, audio ? styles.gone : null]}
       />
+      {audio ? (
+        <View style={styles.center} pointerEvents="none">
+          {audio.cover}
+        </View>
+      ) : null}
       <Pressable
         style={StyleSheet.absoluteFill}
         onPress={onPicture}
@@ -151,7 +176,7 @@ export function VideoPlayer({ source, name, variant = "inline", width = 300, onO
         accessibilityLabel={started ? playLabel : `${t("mobile.files.video.play")}: ${name}`}
       />
 
-      {!started ? (
+      {!started && !audio ? (
         <View style={styles.center} pointerEvents="box-none">
           <Pressable
             onPress={toggle}
@@ -164,7 +189,7 @@ export function VideoPlayer({ source, name, variant = "inline", width = 300, onO
         </View>
       ) : null}
 
-      {loading && started ? (
+      {loading && started && !audio ? (
         <View style={styles.center} pointerEvents="none">
           <ActivityIndicator color="#fff" />
         </View>
@@ -191,7 +216,7 @@ export function VideoPlayer({ source, name, variant = "inline", width = 300, onO
         </Pressable>
       ) : null}
 
-      {started && shown ? (
+      {(started || audio) && shown ? (
         <Glass style={[styles.bar, inline ? styles.barInline : null]}>
           <BarButton icon={ended ? "replay" : playing ? "pause" : "play"} label={playLabel} onPress={toggle} />
           <Track
@@ -211,11 +236,13 @@ export function VideoPlayer({ source, name, variant = "inline", width = 300, onO
               wake();
             }}
           />
-          <BarButton
-            icon="fullscreen"
-            label={t("mobile.files.video.fullscreen")}
-            onPress={() => void view.current?.enterFullscreen()}
-          />
+          {audio ? null : (
+            <BarButton
+              icon="fullscreen"
+              label={t("mobile.files.video.fullscreen")}
+              onPress={() => void view.current?.enterFullscreen()}
+            />
+          )}
         </Glass>
       ) : null}
     </View>
@@ -305,6 +332,8 @@ function Track({
 
 const styles = StyleSheet.create({
   box: { overflow: "hidden", backgroundColor: "#000" },
+  // Sound alone: the view stays (it holds the player) but shows nothing.
+  gone: { opacity: 0 },
   // An attachment's shape (as the tiles beside it): rounded, the bottom left corner cut, a hairline.
   inline: { borderRadius: 16, borderBottomLeftRadius: 4, borderWidth: StyleSheet.hairlineWidth },
   screen: { flex: 1 },

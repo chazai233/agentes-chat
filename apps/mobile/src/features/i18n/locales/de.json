@@ -1223,6 +1223,8 @@
     "previous": "Vorheriges Bild",
     "next": "Nächstes Bild",
     "noPreview": "Diese Datei öffnet sich nicht in der App. Sende sie an eine andere App, um sie zu öffnen.",
+    "rowsCut": "Nur die ersten {{rows}} Zeilen werden angezeigt. Teile die Datei, um alles zu sehen.",
+    "sheetEmpty": "Dieses Blatt ist leer.",
     "video": {
       "play": "Abspielen",
       "pause": "Pausieren",

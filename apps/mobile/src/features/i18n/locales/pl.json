@@ -1377,6 +1377,8 @@
     "previous": "Poprzednie zdjęcie",
     "next": "Następne zdjęcie",
     "noPreview": "Ten plik nie otwiera się w aplikacji. Wyślij go do innej aplikacji, żeby go otworzyć.",
+    "rowsCut": "Widać tylko pierwsze {{rows}} wierszy. Udostępnij plik, aby zobaczyć całość.",
+    "sheetEmpty": "Ten arkusz jest pusty.",
     "video": {
       "play": "Odtwórz",
       "pause": "Wstrzymaj",

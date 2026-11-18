@@ -15,14 +15,15 @@ import { MessageText } from "../chat/MessageText";
 import { useColors, useDirectory, useOrgId } from "../shared/hooks";
 import { copyText, goBack, MONO } from "../shared/parts";
 import { useFileActions } from "./actions";
-import { type FileInfo, fileInfo } from "./logic";
+import { type FileInfo, fileInfo, officeKindOf } from "./logic";
 import { FileTile, useFileLine } from "./MessageFiles";
-import { fileText, usePdfBytes, useRemoteFile } from "./source";
+import { fileText, useFileBytes, useRemoteFile } from "./source";
 import { VideoPlayer } from "./VideoPlayer";
 
 /**
- * A file opened from a message: Markdown and text drawn by the
- * app, PDF in a web view (iOS draws PDFs natively there; Android through our pdf.js page), a video in our player, anything else as its card. Top: close,
+ * A file opened from a message: Markdown, text and code drawn by the app; PDF, Word, spreadsheets, CSV, PowerPoint and
+ * ZIP on the app's own preview pages (iOS's web view draws PDFs and Office files natively, so it shows those itself);
+ * pictures, video and audio in our players; anything else as its card. Top: close,
  * Copiar texto and the "…", then the name and "Documento · 4 KB · Theo" on a row of their own. Bottom: Enviar and
  * Compartilhar; Ver no Drive in the "…".
  */
@@ -57,6 +58,9 @@ function Viewer({ id, version }: { id: string; version?: number }) {
     );
   };
   const pdf = info?.view === "pdf";
+  const office = info?.view === "office" ? officeKindOf(info.name, info.mime) : null;
+  // The preview pages take the bytes by message; past this size the file shows its card.
+  const fits = info ? info.size === null || info.size <= PREVIEW_MAX_BYTES : false;
 
   return (
     <View style={[styles.screen, { backgroundColor: c.bg }]}>
@@ -103,10 +107,16 @@ function Viewer({ id, version }: { id: string; version?: number }) {
           </Center>
         ) : info.view === "markdown" || info.view === "text" ? (
           <TextPage detail={detail} markdown={info.view === "markdown"} json={isJsonFile(info.name, info.mime)} />
-        ) : pdf && Platform.OS === "ios" ? (
-          <PdfPage detail={detail} />
-        ) : pdf && (info.size === null || info.size <= PDF_MAX_BYTES) ? (
-          <AndroidPdfPage detail={detail} info={info} />
+        ) : (pdf || (office !== null && office !== "csv")) && Platform.OS === "ios" ? (
+          <NativePage detail={detail} />
+        ) : pdf && fits ? (
+          <PreviewPage detail={detail} info={info} page="pdf" />
+        ) : office && fits ? (
+          <PreviewPage detail={detail} info={info} page="file" kind={office} />
+        ) : info.view === "archive" && fits ? (
+          <PreviewPage detail={detail} info={info} page="file" kind="zip" />
+        ) : info.view === "audio" ? (
+          <AudioPage detail={detail} info={info} />
         ) : info.view === "video" ? (
           <VideoPage detail={detail} info={info} />
         ) : info.view === "image" ? (
@@ -202,8 +212,11 @@ function TextPage({ detail, markdown, json }: { detail: ArtifactDetail; markdown
   );
 }
 
-/** A PDF from its short-lived link (with the session when the link is ours). */
-function PdfPage({ detail }: { detail: ArtifactDetail }) {
+/**
+ * A PDF or Office file on an iPhone, from its short-lived link (with the session when the link is ours): iOS's web
+ * view draws them natively.
+ */
+function NativePage({ detail }: { detail: ArtifactDetail }) {
   const orgId = useOrgId();
   const c = useColors();
   const link = useRemoteFile(orgId, detail.id, detail.shownVersion);
@@ -232,22 +245,32 @@ function PdfPage({ detail }: { detail: ArtifactDetail }) {
 }
 
 /**
- * The biggest PDF Android draws in the app: the bytes cross to the web view as text (a third larger), held twice
- * for a moment. Past it, the file's card and Compartilhar.
+ * The biggest file a preview page draws: the bytes cross to the web view as text (a third larger), held twice for a
+ * moment. Past it, the file's card and Compartilhar.
  */
-const PDF_MAX_BYTES = 40 * 1024 * 1024;
+const PREVIEW_MAX_BYTES = 40 * 1024 * 1024;
 
-// Built by scripts/pdfjs/build-viewer.mjs: pdf.js with its worker and CMaps, all inline (see its README).
-const PDF_VIEWER = require("../../../assets/pdfjs/viewer.html");
+/** Rows a sheet shows at most on the preview page. */
+const SHEET_ROWS = 1000;
 
-/** The viewer page as a file on the phone, copied out of the app once. */
-function useViewerPage() {
+/**
+ * The app's preview pages, each one self-contained HTML in the app (see their READMEs): pdf.js for PDFs
+ * (scripts/pdfjs), and Word, spreadsheets, CSV, PowerPoint and ZIP (scripts/preview).
+ */
+const PAGES = {
+  pdf: require("../../../assets/pdfjs/viewer.html"),
+  file: require("../../../assets/preview/viewer.html"),
+} as const;
+type PageName = keyof typeof PAGES;
+
+/** A preview page as a file on the phone, copied out of the app once. */
+function usePage(name: PageName) {
   return useQuery({
-    queryKey: ["pdf-viewer-page"] as const,
+    queryKey: ["preview-page", name] as const,
     queryFn: async () => {
-      const asset = Asset.fromModule(PDF_VIEWER);
+      const asset = Asset.fromModule(PAGES[name]);
       await asset.downloadAsync();
-      if (!asset.localUri) throw new Error("viewer page missing");
+      if (!asset.localUri) throw new Error("preview page missing");
       return asset.localUri;
     },
     staleTime: Number.POSITIVE_INFINITY,
@@ -256,16 +279,27 @@ function useViewerPage() {
 }
 
 /**
- * A PDF on Android, whose WebView has no PDF viewer: our pdf.js page draws it, the pages as they scroll into view,
- * pinch to zoom. The page loads from the app's files with no network; the bytes go to it by message once it's ready.
- * A file it can't read shows its card.
+ * A file drawn by one of the app's preview pages: the page loads from the app's own files, reaches no network (its
+ * content policy says so), and gets the bytes by message once it says it's ready. PDFs page by page with pinch zoom;
+ * Word as pages; sheets as a grid with a tab per sheet; slides one under another; a ZIP's folders and files. A file
+ * the page can't read shows its card.
  */
-function AndroidPdfPage({ detail, info }: { detail: ArtifactDetail; info: FileInfo }) {
+function PreviewPage({
+  detail,
+  info,
+  page: name,
+  kind,
+}: {
+  detail: ArtifactDetail;
+  info: FileInfo;
+  page: PageName;
+  kind?: "docx" | "sheet" | "csv" | "pptx" | "zip";
+}) {
   const { t } = useTranslation();
   const orgId = useOrgId();
   const c = useColors();
-  const page = useViewerPage();
-  const bytes = usePdfBytes(orgId, detail, true);
+  const page = usePage(name);
+  const bytes = useFileBytes(orgId, detail, true);
   const web = useRef<WebView<object>>(null);
   // Counts the page's "ready"s: a page that loads again (its process restarted) gets the bytes again.
   const [ready, setReady] = useState(0);
@@ -275,30 +309,37 @@ function AndroidPdfPage({ detail, info }: { detail: ArtifactDetail; info: FileIn
   useEffect(() => {
     if (ready === 0 || bytes.data === undefined || sent.current) return;
     sent.current = true;
-    web.current?.postMessage(JSON.stringify({ type: "pdf", data: bytes.data }));
-  }, [ready, bytes.data]);
+    const msg = name === "pdf" ? { type: "pdf", data: bytes.data } : { type: "file", kind, data: bytes.data };
+    web.current?.postMessage(JSON.stringify(msg));
+  }, [ready, bytes.data, name, kind]);
 
   const uri = useMemo(() => {
     if (!page.data) return null;
     const q = new URLSearchParams({
       bg: c.sunken,
+      ink: c.ink,
       muted: c.faint,
+      line: c.line2,
+      raised: c.raised,
       loading: t("common.loading"),
       failed: t("mobile.files.loadFailed"),
+      rowsCut: t("mobile.files.rowsCut", { rows: SHEET_ROWS }),
+      empty: t("mobile.files.sheetEmpty"),
+      maxRows: String(SHEET_ROWS),
     });
     return `${page.data}?${q.toString()}`;
-  }, [page.data, c.sunken, c.faint, t]);
+  }, [page.data, c.sunken, c.ink, c.faint, c.line2, c.raised, t]);
 
   if (failed || bytes.isError || page.isError) return <BigCard info={info} />;
   return (
     <View style={[styles.page, styles.clip, { backgroundColor: c.sunken }]}>
-      {uri ? (
+      {uri && page.data ? (
         <WebView
           ref={web}
           source={{ uri }}
           originWhitelist={["file://*"]}
-          // Only the page itself: a link inside the PDF never navigates the view away.
-          onShouldStartLoadWithRequest={(r) => r.url.startsWith("file://")}
+          // Only the page itself: a link inside the file never navigates the view away.
+          onShouldStartLoadWithRequest={(r) => r.url.startsWith(page.data as string)}
           javaScriptEnabled
           allowFileAccess
           onMessage={(e) => {
@@ -324,7 +365,38 @@ function AndroidPdfPage({ detail, info }: { detail: ArtifactDetail; info: FileIn
   );
 }
 
-/** A video, filling the screen between the top and the bar; one this phone can't play shows its card. */
+/** An audio file: the video player playing sound alone, the file's tile in the middle. */
+function AudioPage({ detail, info }: { detail: ArtifactDetail; info: FileInfo }) {
+  const orgId = useOrgId();
+  const c = useColors();
+  const link = useRemoteFile(orgId, detail.id, detail.shownVersion);
+  const [failed, setFailed] = useState(false);
+  const source = useMemo(
+    () => (link.data ? { uri: link.data.uri, ...(link.data.headers ? { headers: link.data.headers } : {}) } : null),
+    [link.data],
+  );
+  const cover = useMemo(() => ({ cover: <FileTile ext={info.ext} size="lg" /> }), [info.ext]);
+  if (failed || link.isError) return <BigCard info={info} />;
+  return (
+    <View style={[styles.page, styles.clip, styles.picture]}>
+      {source ? (
+        <VideoPlayer
+          key={source.uri}
+          variant="screen"
+          source={source}
+          name={info.name}
+          audio={cover}
+          onFailed={() => setFailed(true)}
+        />
+      ) : (
+        <Center>
+          <ActivityIndicator color={c.faint} />
+        </Center>
+      )}
+    </View>
+  );
+}
+
 /** A picture, whole on the page (the picture viewer, with its zoom, opens from the chat and the Drive's cards). */
 function ImagePage({ detail, info }: { detail: ArtifactDetail; info: FileInfo }) {
   const orgId = useOrgId();
@@ -352,6 +424,7 @@ function ImagePage({ detail, info }: { detail: ArtifactDetail; info: FileInfo })
   );
 }
 
+/** A video, filling the screen between the top and the bar; one this phone can't play shows its card. */
 function VideoPage({ detail, info }: { detail: ArtifactDetail; info: FileInfo }) {
   const orgId = useOrgId();
   const c = useColors();

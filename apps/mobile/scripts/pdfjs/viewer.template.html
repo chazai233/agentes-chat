@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=5, user-scalable=yes">
+<!-- Nothing leaves the phone: no network, scripts only from the page itself (its worker from a Blob URL). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:; worker-src blob:; style-src 'unsafe-inline'; img-src data: blob:; font-src data: blob:">
 <!--
   The app's PDF page for Android, whose WebView has no PDF viewer of its own (iOS draws PDFs natively).
   Built by scripts/pdfjs/build-viewer.mjs from pdf.js __PDFJS_VERSION__ (Mozilla, Apache License 2.0,

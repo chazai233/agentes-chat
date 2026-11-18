@@ -10,6 +10,7 @@ import {
   extensionOf,
   extLabel,
   fileInfo,
+  officeKindOf,
   pageStep,
   resolveDownloadUrl,
   safeFileName,
@@ -50,11 +51,12 @@ describe("videos", () => {
 });
 
 describe("file kind, tile and size", () => {
-  test("raster pictures are images; SVG is not", () => {
+  test("pictures are images, SVG and BMP included (expo-image draws both)", () => {
     expect(fileInfo(upload("home.png", "image/png")).view).toBe("image");
     expect(fileInfo(upload("foto.JPG", "image/jpeg; charset=binary")).view).toBe("image");
-    expect(fileInfo(upload("logo.svg", "image/svg+xml")).view).toBe("other");
+    expect(fileInfo(upload("logo.svg", "image/svg+xml")).view).toBe("image");
     expect(fileInfo(upload("logo.svg", "image/svg+xml")).type).toBe("image");
+    expect(fileInfo(upload("scan.bmp", "application/octet-stream")).view).toBe("image");
   });
 
   test("PDF, Markdown and text open in the document screen", () => {
@@ -62,16 +64,39 @@ describe("file kind, tile and size", () => {
     expect(pdf).toMatchObject({ view: "pdf", type: "pdf", ext: "PDF", size: 2048, name: "Relatório.pdf" });
     expect(fileInfo(upload("notes.md", "application/octet-stream")).view).toBe("markdown");
     expect(fileInfo(upload("notes.md", "text/markdown")).type).toBe("document");
-    const csv = fileInfo(upload("vendas.csv", "text/csv"));
-    expect(csv).toMatchObject({ view: "text", type: "table", ext: "CSV" });
     expect(fileInfo(upload("log.txt", "text/plain")).type).toBe("text");
+    // Source code reads as text.
+    expect(fileInfo(upload("main.py", "application/octet-stream")).view).toBe("text");
+    expect(fileInfo(upload("App.kt", "")).view).toBe("text");
+  });
+
+  test("Office files, tables, ZIPs and audio open on their preview pages and player", () => {
+    const csv = fileInfo(upload("vendas.csv", "text/csv"));
+    expect(csv).toMatchObject({ view: "office", type: "table", ext: "CSV" });
+    expect(officeKindOf(csv.name, csv.mime)).toBe("csv");
+    const xlsx = fileInfo(upload("进度.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
+    expect(xlsx.view).toBe("office");
+    expect(officeKindOf(xlsx.name, xlsx.mime)).toBe("sheet");
+    expect(officeKindOf("周报.docx")).toBe("docx");
+    expect(officeKindOf("汇报.pptx")).toBe("pptx");
+    expect(officeKindOf("old.xls")).toBe("sheet");
+    // Older and Apple formats: iPhones show them natively, Android shows their card.
+    expect(fileInfo(upload("old.doc", "application/msword")).view).toBe("office");
+    expect(officeKindOf("old.doc", "application/msword")).toBe("");
+    expect(fileInfo(upload("backup.zip", "application/zip"))).toMatchObject({
+      view: "archive",
+      type: "archive",
+      ext: "ZIP",
+    });
+    expect(fileInfo(upload("voz.m4a", "audio/mp4")).view).toBe("audio");
+    expect(fileInfo(upload("song.mp3", "application/octet-stream")).view).toBe("audio");
   });
 
   test("other files are cards with their type", () => {
-    expect(fileInfo(upload("backup.zip", "application/zip"))).toMatchObject({
+    expect(fileInfo(upload("backup.tar.gz", "application/gzip"))).toMatchObject({
       view: "other",
       type: "archive",
-      ext: "ZIP",
+      ext: "GZ",
     });
     expect(fileInfo(upload("sem-extensao", "application/octet-stream"))).toMatchObject({ type: "file", ext: "" });
   });

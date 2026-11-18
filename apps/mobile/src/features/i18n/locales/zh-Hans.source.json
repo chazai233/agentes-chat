@@ -3017,6 +3017,12 @@
   "files.noPreview": {
     "value": "This file doesn't open in the app. Send it to another app to open it."
   },
+  "files.rowsCut": {
+    "value": "Only the first {{rows}} rows are shown. Share the file to see all of it."
+  },
+  "files.sheetEmpty": {
+    "value": "This sheet is empty."
+  },
   "files.video.play": {
     "value": "Play"
   },
