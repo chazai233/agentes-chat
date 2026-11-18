@@ -47,7 +47,7 @@ const lastPlayed = new Map<SoundName, number>();
 
 function fileFor(style: SoundStyle, name: SoundName) {
   const file = new File(Paths.cache, `sound-${VERSION}-${style}-${name}.wav`);
-  if (!file.exists) file.write(wavBytes(renderSound(style, name)));
+  if (!file.exists) file.writeSync(wavBytes(renderSound(style, name)));
   return file;
 }
 

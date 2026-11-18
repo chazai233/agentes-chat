@@ -55,6 +55,7 @@
 
 | 版本 | 内容 |
 |---|---|
+| v1.2.7 | 修复预览显示“文件为空”（读取早于写入完成） |
 | v1.2.6 | 预览改用应用自己的连接下载；被拒时显示是谁拒绝、返回了什么 |
 | v1.2.5 | 预览失败时显示原因 |
 | v1.2.4 | 应用内预览 Word、Excel/CSV、PPT、ZIP、音频、SVG 和代码文件 |
@@ -135,6 +136,7 @@ same signature installs over the one you have.
 
 | Version | What's in it |
 |---|---|
+| v1.2.7 | Previews no longer read a copy before it's written ("file is empty") |
 | v1.2.6 | Previews download over the app's own connection; a refusal shows who refused and what they answered |
 | v1.2.5 | A failed preview says why |
 | v1.2.4 | Word, Excel/CSV, PowerPoint, ZIP, audio, SVG and code files open inside the app |

@@ -43,7 +43,7 @@ async function download(r: RemoteFile, file: File): Promise<void> {
   }
   const bytes = new Uint8Array(await res.arrayBuffer());
   if (!file.exists) file.create();
-  file.write(bytes);
+  await file.write(bytes);
 }
 
 /** The link to show a picture or a PDF (refreshed before it expires). */
@@ -103,7 +103,13 @@ export function useFileBytes(orgId: string, a: ArtifactDetail | null, enabled: b
           throw err;
         }
       }
-      return file.base64();
+      const data = await file.base64();
+      // An empty copy is never kept: the next open downloads again.
+      if (!data) {
+        file.delete();
+        throw new Error("empty download");
+      }
+      return data;
     },
     enabled: enabled && a !== null,
     staleTime: Number.POSITIVE_INFINITY,
@@ -130,7 +136,7 @@ export async function localCopy(
   const source = shareSource(a);
   const file = cacheFile(a, safeFileName(source.name));
   if (source.from === "text") {
-    file.write(source.text);
+    file.writeSync(source.text);
     return { uri: file.uri, source };
   }
   const r =

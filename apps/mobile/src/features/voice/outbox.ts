@@ -60,7 +60,7 @@ function read(): VoiceSend[] {
 function write() {
   try {
     if (!folder().exists) folder().create({ intermediates: true });
-    index().write(JSON.stringify(queue ?? []));
+    index().writeSync(JSON.stringify(queue ?? []));
   } catch {
     // Not kept across a restart; it still goes while the app stays open.
   }

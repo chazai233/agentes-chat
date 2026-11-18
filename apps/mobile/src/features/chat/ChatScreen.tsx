@@ -1141,7 +1141,7 @@ function Chat({
     const dir = new Directory(Paths.cache, "drafts", String(Date.now()));
     dir.create({ intermediates: true, idempotent: true });
     const file = new File(dir, t("channel.tooLong.fileName"));
-    file.write(text);
+    file.writeSync(text);
     addPending([{ uri: file.uri, name: file.name, type: "text/plain" }]);
   };
   const uploadOne = async (file: PendingFile): Promise<ArtifactRef> => {

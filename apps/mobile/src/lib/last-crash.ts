@@ -20,7 +20,7 @@ export function keepLastCrash() {
     if (isFatal) {
       try {
         const e = error instanceof Error ? error : new Error(String(error));
-        new File(Paths.document, NAME).write(`${new Date().toISOString()}\n${e.message}\n${e.stack ?? ""}\n`);
+        new File(Paths.document, NAME).writeSync(`${new Date().toISOString()}\n${e.message}\n${e.stack ?? ""}\n`);
       } catch {
         // Nothing to keep it in: the crash goes on as before.
       }

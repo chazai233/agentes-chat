@@ -167,7 +167,7 @@ export function useVoiceTake(target: VoiceTarget) {
       try {
         const bytes = joinM4a(await new File(last.uri).bytes(), await new File(stretch.uri).bytes());
         const file = new File(Paths.cache, `voice-${newClientId()}.m4a`);
-        file.write(bytes);
+        file.writeSync(bytes);
         removeFile(last.uri);
         removeFile(stretch.uri);
         last.uri = file.uri;
