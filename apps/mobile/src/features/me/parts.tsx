@@ -10,6 +10,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useOrg } from "@/providers/org";
 import { Locked, useToast } from "@/ui";
 import { useColors, useDirectory, useMeId } from "../shared/hooks";
+import { showActionSheet } from "../shared/PickerSheet";
 import { type HeaderWordAction, PushedHeader } from "../shared/parts";
 import { type AccountDraft, PHOTO_MAX_BASE64, photoContentType } from "./logic";
 
@@ -179,11 +180,19 @@ export function useChangePhoto() {
         },
         run,
       );
-    else
-      Alert.alert(t("mobile.me.account.changePhoto"), undefined, [
-        ...labels.map((text, i) => ({ text, onPress: () => run(i) })),
-        { text: t("mobile.common.cancel"), style: "cancel" as const },
-      ]);
+    // Android: the app's sheet (the system's dialog holds three buttons, so Cancelar was lost beside three choices).
+    else if (
+      !showActionSheet(
+        t("mobile.me.account.changePhoto"),
+        labels.map((label, i) => ({ label, destructive: hasPhoto && i === 2, onPress: () => run(i) })),
+      )
+    )
+      Alert.alert(
+        t("mobile.me.account.changePhoto"),
+        undefined,
+        labels.map((text, i) => ({ text, onPress: () => run(i) })),
+        { cancelable: true },
+      );
   };
 
   return { changePhoto, uploading };

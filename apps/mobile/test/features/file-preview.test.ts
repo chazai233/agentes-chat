@@ -37,3 +37,14 @@ test("the PDF page is self-contained: pdf.js, its worker, CMaps and license inli
   // Bytes come by message, after the page says it's ready.
   expect(page).toContain('post({ type: "ready" })');
 });
+
+test("the file's '…' is the app's own sheet (closable) with Download and Open in another app; the bar is Download and Send to…", () => {
+  const actions = app("src/features/files/actions.ts");
+  expect(actions).toContain("showActionSheet(");
+  expect(actions).not.toContain("Alert.alert(");
+  for (const key of ["download", "openWith", "sendTo", "savePhotos", "shareSettings", "drive"])
+    expect(actions).toContain(`t("mobile.files.${key}")`);
+  const viewer = app("src/features/files/DocumentViewer.tsx");
+  expect(viewer).toContain('label={t("mobile.files.download")}');
+  expect(viewer).toContain('label={t("mobile.files.sendTo")}');
+});

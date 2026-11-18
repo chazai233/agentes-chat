@@ -74,16 +74,26 @@ export function showActionSheet(
   title: string,
   actions: readonly {
     label: string;
+    /** Its icon's tile at the row's start. */
+    icon?: IconName | undefined;
     destructive?: boolean | undefined;
     checked?: boolean | undefined;
     onPress: () => void;
   }[],
+  /** One quiet line under the title (a file's type and size). */
+  note?: string,
 ): boolean {
   if (!present) return false;
-  const options = actions.map((a, i) => ({ key: String(i), label: a.label, destructive: a.destructive }));
+  const options = actions.map((a, i) => ({
+    key: String(i),
+    label: a.label,
+    destructive: a.destructive,
+    ...(a.icon ? { leading: { kind: "icon" as const, name: a.icon } } : {}),
+  }));
   const checkedAt = actions.findIndex((a) => a.checked);
   present({
     title,
+    ...(note ? { note } : {}),
     options,
     value: checkedAt >= 0 ? String(checkedAt) : null,
     mode: "actions",

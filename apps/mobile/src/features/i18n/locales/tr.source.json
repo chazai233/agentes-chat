@@ -2981,6 +2981,27 @@
   "files.drive": {
     "value": "View in Drive"
   },
+  "files.download": {
+    "value": "Download"
+  },
+  "files.downloaded": {
+    "value": "Saved to {{folder}}"
+  },
+  "files.downloadFailed": {
+    "value": "Couldn't save the file."
+  },
+  "files.openWith": {
+    "value": "Open in another app"
+  },
+  "files.noApp": {
+    "value": "No app on this phone opens this file."
+  },
+  "files.sendTo": {
+    "value": "Send to\u2026"
+  },
+  "files.shareSettings": {
+    "value": "Sharing settings"
+  },
   "files.saved": {
     "value": "Saved to Photos"
   },

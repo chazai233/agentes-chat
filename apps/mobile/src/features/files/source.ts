@@ -161,6 +161,77 @@ export async function shareFile(api: ApiClient, orgId: string, a: ArtifactDetail
   );
 }
 
+/** Where "Download" saves on Android: the folder the person picked once (the system's own picker), kept here. */
+const downloadFolderFile = () => new File(Paths.document, "download-folder.txt");
+
+function savedDownloadFolder(): Directory | null {
+  try {
+    const f = downloadFolderFile();
+    const uri = f.exists ? f.textSync().trim() : "";
+    return uri ? new Directory(uri) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Download: a copy of the file on the phone. Android asks once for the folder (the system's picker, Downloads
+ * suggested; the app keeps access to it) and saves there from then on, again asking only when that folder is gone;
+ * iPhones save through the share sheet's "Save to Files". Resolves with the folder's name, or null when the person
+ * closed the picker or the sheet.
+ */
+export async function saveToDevice(api: ApiClient, orgId: string, a: ArtifactDetail): Promise<string | null> {
+  const { uri, source } = await localCopy(api, orgId, a);
+  if (Platform.OS !== "android") {
+    await Sharing.shareAsync(uri);
+    return null;
+  }
+  const bytes = await new File(uri).bytes();
+  const into = async (dir: Directory) => {
+    // A name already there gets the system's " (1)".
+    const target = dir.createFile(source.name, source.mime || null);
+    await target.write(bytes);
+    return dir.name;
+  };
+  const saved = savedDownloadFolder();
+  if (saved) {
+    try {
+      return await into(saved);
+    } catch {
+      // The folder was removed or its access taken back: ask again.
+    }
+  }
+  let picked: Directory;
+  try {
+    picked = await Directory.pickDirectoryAsync(DOWNLOADS_HINT);
+  } catch {
+    return null;
+  }
+  const name = await into(picked);
+  try {
+    downloadFolderFile().writeSync(picked.uri);
+  } catch {
+    // Not remembered: the picker asks again next time.
+  }
+  return name;
+}
+
+/** The picker opens on the phone's Downloads (a hint: the system may start elsewhere). */
+const DOWNLOADS_HINT = "content://com.android.externalstorage.documents/document/primary%3ADownload";
+
+/**
+ * Opens the file in another app on the phone (Android's "Open with", iOS's Quick Look). False when nothing on the
+ * phone opens its type.
+ */
+export async function openWithApp(api: ApiClient, orgId: string, a: ArtifactDetail): Promise<boolean> {
+  const { uri, source } = await localCopy(api, orgId, a);
+  const file = new File(uri);
+  const options = source.mime ? { mimeType: source.mime } : {};
+  if (!(await File.canPreview(file, options))) return false;
+  await File.preview(file, { ...options, title: source.name });
+  return true;
+}
+
 /** Salvar em Fotos: add-only access (never reads the library). False when the person said no. */
 export async function saveToPhotos(api: ApiClient, orgId: string, a: ArtifactDetail): Promise<boolean> {
   const perm = await MediaLibrary.requestPermissionsAsync(true, ["photo"]);

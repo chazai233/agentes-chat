@@ -188,6 +188,12 @@ export const ICONS = {
   text: [p("M5 7h14M5 12h14M5 17h9")],
   eye: [p("M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12Z"), c(12, 12, 2.6)],
   down: [p("M12 5v14M6 13l6 6 6-6")],
+  // A file's menu: saved to the phone (into a tray), and opened in another app (out of a box).
+  download: [p("M12 3.5v11M8 10.5l4 4 4-4"), p("M4.5 15v3A1.5 1.5 0 0 0 6 19.5h12a1.5 1.5 0 0 0 1.5-1.5v-3")],
+  openApp: [
+    p("M14 4.5h5.5V10M19.5 4.5l-8 8"),
+    p("M17 13.5V18a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 18V8.5A1.5 1.5 0 0 1 6 7h4.5"),
+  ],
   wifi: [p("M2 8.5a15 15 0 0 1 20 0M5.5 12a10 10 0 0 1 13 0M9 15.5a5 5 0 0 1 6 0"), p("M12 19h.01")],
   // The web's Membros icon on this grid: someone asking to join.
   members: [

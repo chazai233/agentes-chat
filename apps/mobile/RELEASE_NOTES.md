@@ -1,9 +1,13 @@
-Baiyu Bot v1.2.7 for Android (arm64, Android 7+). Installs over v1.2.6.
+Baiyu Bot v1.2.8 for Android (arm64, Android 7+). Installs over v1.2.7.
 
-- Previews read the file only after it is written: v1.2.6 read the downloaded copy while it was still being saved,
-  so a PDF showed "empty file". An empty copy is never kept now.
-- The same kind of unfinished write fixed for sent files, long drafts sent as a file, joined voice takes, the app's
-  sounds and its saved state (file writes became asynchronous in the file system library; these now finish first).
+- A file's "…" opens the app's own sheet instead of the system dialog, which on Android held three buttons, lost
+  Cancel and couldn't be closed by a tap outside. It shows the file's name, type and size, and: Download, Open in
+  another app, Send to…, Save to Photos (pictures and videos), Sharing settings and View in Drive. A tap outside, a
+  flick down or Back closes it.
+- Download (new): Android asks once for the folder (Downloads suggested) and saves there from then on.
+- Open in another app (new): the phone's own "Open with" (WPS, a browser…).
+- The file screen's bottom buttons are now Download and Send to…; Sharing settings moved to the "…".
+- Change photo (Me › Account) on Android: the same sheet, so Cancel is back.
 
 Same previews as v1.2.4:
 
@@ -21,4 +25,4 @@ Same previews as v1.2.4:
 - Still a card, with Share to open elsewhere: old .doc and .ppt, Apple Pages/Numbers/Keynote, other archives
   (.rar, .7z, .tar.gz), and files over 40 MB.
 
-中文：修复预览读到“空文件”：v1.2.6 在文件还没写完时就去读了。同类问题也一并修了（发送文件、长草稿转文件、语音拼接、提示音和本地状态保存）。v1.2.4 的内容：常见文件都能在应用里直接预览了：Word、Excel/CSV（含中文 Excel 导出的 GBK 编码）、PPT、ZIP 目录、音频、SVG 图片和代码文件。旧版 .doc/.ppt、rar/7z 压缩包和超过 40 MB 的文件仍显示文件卡片，可用“分享”在其他应用打开。
+中文：文件“⋯”菜单改为应用自己的底部菜单（点空白处、下滑或返回键都能关闭），新增“下载”和“用其他应用打开”；底部按钮改为“下载”和“发送到…”，“共享设置”移入菜单。此前：修复预览读到“空文件”：v1.2.6 在文件还没写完时就去读了。同类问题也一并修了（发送文件、长草稿转文件、语音拼接、提示音和本地状态保存）。v1.2.4 的内容：常见文件都能在应用里直接预览了：Word、Excel/CSV（含中文 Excel 导出的 GBK 编码）、PPT、ZIP 目录、音频、SVG 图片和代码文件。旧版 .doc/.ppt、rar/7z 压缩包和超过 40 MB 的文件仍显示文件卡片，可用“分享”在其他应用打开。

@@ -24,8 +24,8 @@ import { VideoPlayer } from "./VideoPlayer";
  * A file opened from a message: Markdown, text and code drawn by the app; PDF, Word, spreadsheets, CSV, PowerPoint and
  * ZIP on the app's own preview pages (iOS's web view draws PDFs and Office files natively, so it shows those itself);
  * pictures, video and audio in our players; anything else as its card. Top: close,
- * Copiar texto and the "…", then the name and "Documento · 4 KB · Theo" on a row of their own. Bottom: Enviar and
- * Compartilhar; Ver no Drive in the "…".
+ * Copiar texto and the "…", then the name and "Documento · 4 KB · Theo" on a row of their own. Bottom: Download and
+ * Send to…; the rest (open in another app, sharing settings, View in Drive) in the "…".
  */
 export function DocumentViewer({ id, version }: { id: string; version?: number }) {
   return (
@@ -80,7 +80,7 @@ function Viewer({ id, version }: { id: string; version?: number }) {
           icon="more"
           plate
           label={t("mobile.files.more")}
-          onPress={() => actions.more(false)}
+          onPress={() => actions.more(info?.view === "video")}
           disabled={!detail}
         />
       </View>
@@ -127,28 +127,29 @@ function Viewer({ id, version }: { id: string; version?: number }) {
       </View>
 
       <View style={[styles.bar, { paddingBottom: insets.bottom + 12, borderTopColor: c.line2, backgroundColor: c.bg }]}>
+        {/* Download and Send to…: what a file opened on a phone is most often for; the rest in the "…". */}
         <View style={styles.half}>
           <Button
             variant="secondary"
             wide
-            icon="share"
-            label={t("mobile.files.send")}
-            disabled={!detail || actions.busy !== null}
-            onPress={actions.share}
+            icon="download"
+            label={t("mobile.files.download")}
+            disabled={!detail || (actions.busy !== null && actions.busy !== "download")}
+            loading={actions.busy === "download"}
+            onPress={() => void actions.download()}
           />
         </View>
-        {detail?.inDrive !== false ? (
-          <View style={styles.half}>
-            <Button
-              variant="primary"
-              wide
-              icon="person"
-              label={t("share.button")}
-              disabled={!detail}
-              onPress={actions.shareSheet}
-            />
-          </View>
-        ) : null}
+        <View style={styles.half}>
+          <Button
+            variant="primary"
+            wide
+            icon="share"
+            label={t("mobile.files.sendTo")}
+            disabled={!detail || (actions.busy !== null && actions.busy !== "share")}
+            loading={actions.busy === "share"}
+            onPress={() => void actions.share()}
+          />
+        </View>
       </View>
     </View>
   );
