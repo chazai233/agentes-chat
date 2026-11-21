@@ -11,6 +11,7 @@
       "!**/migrations/meta",
       "!**/*.html",
       "!docs/design",
+      "!.claude/skills/huashu-design",
       "!**/routeTree.gen.ts",
       "!**/src-tauri/target",
       "!**/src-tauri/gen",

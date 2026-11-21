@@ -39,6 +39,9 @@ const NAMES_PRIVATE_PATHS = new Set(["scripts/check-boundaries.ts", "scripts/che
  */
 const BUNDLED_PAGES = new Set(["apps/mobile/assets/pdfjs/viewer.html", "apps/mobile/assets/preview/viewer.html"]);
 
+/** Third-party skills kept as published (MIT; see each folder's VENDORED.md): not our prose either. */
+const VENDORED_DIRS = [".claude/skills/huashu-design/"];
+
 /**
  * A planning decision id in running text: "(D46)", "D60: …", "D9–D13", "D18/D20", "D104". A slash only joins
  * two ids, so base64 like "ab/D45/x" passes. Cloudflare's D1 is a product name, after R2 in any language ("R2 und D1", "R2, D1").
@@ -126,7 +129,8 @@ if (import.meta.main) {
   // Tracked files and new ones not ignored, so a file is checked before its first commit too.
   const notes: string[] = [];
   for (const path of lsFiles("--cached", "--others", "--exclude-standard")) {
-    if (isPrivate(path) || NAMES_PRIVATE_PATHS.has(path) || BUNDLED_PAGES.has(path)) continue;
+    if (isPrivate(path) || NAMES_PRIVATE_PATHS.has(path) || BUNDLED_PAGES.has(path) || VENDORED_DIRS.some((d) => path.startsWith(d)))
+      continue;
     const file = Bun.file(path);
     if (!(await file.exists())) continue; // deleted, not staged yet
     const text = await file.text();
