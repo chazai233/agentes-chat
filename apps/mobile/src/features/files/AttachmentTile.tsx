@@ -40,7 +40,8 @@ const SIGNED = /^([+\-−])\s?\d[\d.,]*\s?%$/;
 /** A column of numbers, amounts or percentages lines up on the right. */
 const NUMBER = /^[+\-−]?\s?(?:[A-Z]{0,3}\$|€|£)?\s?\d[\d.,\s]*%?$/;
 
-const KIND_ICON: Record<Exclude<ArtifactContent["kind"], "file">, IconName> = {
+/** Keyed by any string too: a kind from a newer server (a live sheet, slides, a canvas) gets its own or a page's. */
+const KIND_ICON: Record<Exclude<ArtifactContent["kind"], "file">, IconName> & Record<string, IconName | undefined> = {
   document: "doc",
   table: "list",
   diff: "code",
@@ -49,6 +50,9 @@ const KIND_ICON: Record<Exclude<ArtifactContent["kind"], "file">, IconName> = {
   block: "globe",
   poll: "check",
   choices: "check",
+  spreadsheet: "list",
+  slides: "doc",
+  canvas: "chart",
 };
 
 export interface TileFile {
@@ -86,7 +90,11 @@ export function AttachmentTile({
       : t("mobile.common.loading")
     : metaOf(t, detail, i18n.language || "en");
   const icon: IconName =
-    !content || content.kind === "file" ? (picture ? "image" : fileIconOf(info?.type)) : KIND_ICON[content.kind];
+    !content || content.kind === "file"
+      ? picture
+        ? "image"
+        : fileIconOf(info?.type)
+      : (KIND_ICON[content.kind] ?? "doc");
   const open = () => {
     if (!detail) return;
     const older = detail.shownVersion < detail.version;
@@ -176,7 +184,7 @@ function metaOf(t: TFunction, detail: ArtifactDetail, locale: string) {
     const size = formatBytes(locale, content.size);
     return ext ? `${ext} · ${size}` : size;
   }
-  const kind = t(`artifacts.kind.${content.kind}`);
+  const kind = t(`artifacts.kind.${content.kind}`, { defaultValue: t("artifacts.kind.html") });
   if (content.kind === "table") return `${kind} · ${t("artifacts.rows", { count: content.rows.length })}`;
   if (content.kind === "diff") {
     const total = { added: 0, removed: 0 };
@@ -216,7 +224,7 @@ function Cover({ detail, fileId }: { detail: ArtifactDetail; fileId: string }) {
     }
     default:
       // A diagram or a page draws only in the file screen (a web view): here its kind's icon.
-      return <TypeCover icon={KIND_ICON[content.kind]} label="" />;
+      return <TypeCover icon={KIND_ICON[content.kind] ?? "doc"} label="" />;
   }
 }
 

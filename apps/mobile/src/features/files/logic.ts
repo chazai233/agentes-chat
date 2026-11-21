@@ -116,8 +116,12 @@ export function officeKindOf(name: string, mime = ""): OfficeKind {
   return "";
 }
 
-/** Non-file artifacts: the extension their download gets (as the server names them). */
-const KIND_EXT: Record<Exclude<ArtifactKind, "file">, string> = {
+/**
+ * Non-file artifacts: the extension their download gets (as the server names them). Keyed by any string: a newer
+ * server sends kinds this app doesn't know yet (live spreadsheets, slides and canvases since 0.1.10), which must
+ * still draw as a card instead of breaking the conversation.
+ */
+const KIND_EXT: Record<Exclude<ArtifactKind, "file">, string> & Record<string, string | undefined> = {
   document: "md",
   table: "csv",
   diff: "patch",
@@ -126,9 +130,11 @@ const KIND_EXT: Record<Exclude<ArtifactKind, "file">, string> = {
   block: "html",
   poll: "json",
   choices: "json",
+  spreadsheet: "xlsx",
+  slides: "pptx",
 };
 
-const KIND_TYPE: Record<Exclude<ArtifactKind, "file">, FileTypeKey> = {
+const KIND_TYPE: Record<Exclude<ArtifactKind, "file">, FileTypeKey> & Record<string, FileTypeKey | undefined> = {
   document: "document",
   table: "table",
   diff: "diff",
@@ -137,6 +143,8 @@ const KIND_TYPE: Record<Exclude<ArtifactKind, "file">, FileTypeKey> = {
   block: "page",
   poll: "file",
   choices: "file",
+  spreadsheet: "table",
+  slides: "file",
 };
 
 /** "relatorio.final.PDF" → "pdf" ("" without one). */
@@ -190,11 +198,11 @@ export function fileInfo(a: Pick<ArtifactDetail, "kind" | "title" | "content">):
     else if (TEXT_EXT.has(ext) || mime.startsWith("text/")) view = "text";
     return { name, view, type: fileType(name, mime, view), ext: extLabel(ext), size: c.size, mime };
   }
-  const ext = KIND_EXT[c.kind];
-  const name = withExtension(a.title, ext);
+  const ext = KIND_EXT[c.kind] ?? "";
+  const name = withExtension(a.title ?? "", ext);
   const view: FileView = c.kind === "document" ? "markdown" : "other";
   const size = c.kind === "document" ? utf8Bytes(c.markdown) : null;
-  return { name, view, type: KIND_TYPE[c.kind], ext: extLabel(ext), size, mime: "" };
+  return { name, view, type: KIND_TYPE[c.kind] ?? "file", ext: extLabel(ext), size, mime: "" };
 }
 
 function fileType(name: string, mime: string, view: FileView): FileTypeKey {
