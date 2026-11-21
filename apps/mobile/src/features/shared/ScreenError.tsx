@@ -18,6 +18,9 @@ export function ScreenError({ error, retry }: ErrorBoundaryProps) {
   const c = useColors();
   const insets = useSafeAreaInsets();
   const words = error instanceof Error ? error.message : String(error);
+  // Where it broke, for a bug report: a release build's stack is addresses in the bundle, read back with the
+  // build's source map (attached to each release beside the APK).
+  const where = error instanceof Error ? stackLines(error.stack) : "";
   useEffect(() => reportError(error), [error]);
   return (
     <ScrollView
@@ -35,14 +38,31 @@ export function ScreenError({ error, retry }: ErrorBoundaryProps) {
           <Text variant="caption" tone="muted" selectable style={styles.mono}>
             {words}
           </Text>
+          {where ? (
+            <Text variant="caption" tone="faint" selectable style={[styles.mono, styles.stack]}>
+              {where}
+            </Text>
+          ) : null}
         </View>
       ) : null}
     </ScrollView>
   );
 }
 
+/** The stack's first frames, without the message line it repeats. */
+export function stackLines(stack: string | undefined, max = 12): string {
+  if (!stack) return "";
+  return stack
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("at "))
+    .slice(0, max)
+    .join("\n");
+}
+
 const styles = StyleSheet.create({
   page: { flexGrow: 1, justifyContent: "center", paddingHorizontal: 24 },
   words: { borderRadius: 14, padding: 12, marginTop: 4 },
   mono: { fontFamily: MONO },
+  stack: { marginTop: 8, fontSize: 10, lineHeight: 14 },
 });

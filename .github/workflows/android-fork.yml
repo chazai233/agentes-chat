@@ -145,6 +145,14 @@ jobs:
           cp "$apk" "$out"
           echo "APK_PATH=$out" >> "$GITHUB_ENV"
           ls -la "$out"
+          # The JS bundle's source map, so a stack a screen shows can be read back (metro-symbolicate).
+          map=$(ls apps/mobile/android/app/build/generated/sourcemaps/react/release/*.map 2> /dev/null | head -1 || true)
+          if [ -n "$map" ]; then
+            cp "$map" "${out%.apk}.js.map"
+            echo "MAP_PATH=${out%.apk}.js.map" >> "$GITHUB_ENV"
+          else
+            echo "::warning::no source map found"
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: android-apk-${{ env.ANDROID_VERSION_CODE }}
@@ -159,10 +167,10 @@ jobs:
           credit="Baiyu Bot is a fork of agentes.chat. Based on agentes.chat by Codari Global, LLC (AGPL-3.0); source: https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}"
           if [ -n "${RELEASE_TAG:-}" ] && ! gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
             { cat apps/mobile/RELEASE_NOTES.md 2> /dev/null || true; printf '\n%s\n' "$credit"; } > "$RUNNER_TEMP/notes.md"
-            gh release create "$RELEASE_TAG" "$APK_PATH" --target "$GITHUB_SHA" \
+            gh release create "$RELEASE_TAG" "$APK_PATH" ${MAP_PATH:+"$MAP_PATH"} --target "$GITHUB_SHA" \
               --title "Baiyu Bot ${RELEASE_TAG}" --notes-file "$RUNNER_TEMP/notes.md"
           else
-            gh release create "android-build-${ANDROID_VERSION_CODE}" "$APK_PATH" --draft --target "$GITHUB_SHA" \
+            gh release create "android-build-${ANDROID_VERSION_CODE}" "$APK_PATH" ${MAP_PATH:+"$MAP_PATH"} --draft --target "$GITHUB_SHA" \
               --title "Android APK (build ${ANDROID_VERSION_CODE})" --notes "$credit"
           fi
       - name: Remove the key copies

@@ -55,6 +55,7 @@
 
 | 版本 | 内容 |
 |---|---|
+| v1.2.10 | 页面出错时显示出错位置，发布附带源码映射 |
 | v1.2.9 | 修复发送图片和文件失败（Unsupported FormDataPart implementation） |
 | v1.2.8 | 文件“⋯”菜单改为底部菜单，新增下载、用其他应用打开；底部按钮改为下载和发送到… |
 | v1.2.7 | 修复预览显示“文件为空”（读取早于写入完成） |
@@ -138,6 +139,7 @@ same signature installs over the one you have.
 
 | Version | What's in it |
 |---|---|
+| v1.2.10 | A broken screen shows where it broke; releases carry the source map |
 | v1.2.9 | Sending photos and files works again ("Unsupported FormDataPart implementation") |
 | v1.2.8 | A file's "…" is the app's own sheet with Download and Open in another app; the bar is Download and Send to… |
 | v1.2.7 | Previews no longer read a copy before it's written ("file is empty") |
