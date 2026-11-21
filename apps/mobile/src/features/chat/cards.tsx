@@ -19,6 +19,7 @@ import {
 } from "@agenteschat/client/lib/agent-work";
 import {
   approvalCardItems,
+  approvalLine,
   approvalRuns,
   approveAllScope,
   approveAlwaysAlso,
@@ -26,6 +27,7 @@ import {
   asOfNow,
   cardDeadline,
   itemOwnWords,
+  type LinePlace,
   runKeys,
 } from "@agenteschat/client/lib/approval-card";
 import { aheadPhase } from "@agenteschat/client/lib/approval-kind";
@@ -41,15 +43,29 @@ import {
   decisionOutcome,
   requesterDecidesLine,
 } from "@agenteschat/client/lib/approval-words";
-import { formatTime, nextLabel, whenAt } from "@agenteschat/client/lib/format";
+import { nextLabel, whenAt } from "@agenteschat/client/lib/format";
 import { agentGrammar } from "@agenteschat/client/lib/grammar";
+import { MAX_MESSAGE_LENGTH } from "@agenteschat/client/lib/message-length";
 import { modeKey } from "@agenteschat/client/lib/workspace-mode";
 import { type ReactNode, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Pressable, StyleSheet, View } from "react-native";
 import Animated, { FadeIn } from "react-native-reanimated";
 import { useOrg } from "@/providers/org";
-import { ACT_LINE, Button, Count, HoldButton, Icon, PixelOrbit, Text, useReducedMotion, useToast } from "@/ui";
+import {
+  ACT_LINE,
+  Button,
+  Count,
+  Disclosure,
+  HoldButton,
+  Icon,
+  PixelOrbit,
+  PressScale,
+  Text,
+  TOUCH,
+  useReducedMotion,
+  useToast,
+} from "@/ui";
 import { router } from "@/ui/navigation";
 import { approvalAction, approvalRisk, approveAlwaysToast } from "../approvals/logic";
 import {
@@ -71,9 +87,10 @@ import {
   useOriginShort,
   useRefuseApproval,
 } from "../approvals/parts";
+import { WhenAsksLink } from "../approvals/when-asks";
 import { chatHref } from "../links/logic";
 import { Face } from "../shared/Face";
-import { useColors, useDirectory, useMeId, useNow, useOrgId, useWhen } from "../shared/hooks";
+import { useColors, useNow, useOrgId, useWhen } from "../shared/hooks";
 import { agentLook, genderOf } from "../shared/logic";
 import { PromptForm } from "../shared/PromptForm";
 import { successHaptic, tapHaptic, useSurface } from "../shared/parts";
@@ -81,6 +98,7 @@ import { useSheet } from "../shared/SheetHost";
 import { type AskAnswer, AskCard, AskFoot, ExpiryLine, useAskStore } from "./asks";
 import { markName, parseInline, threadFaces } from "./logic";
 import { Spans } from "./MessageSpans";
+import { useRowDirectory, useRowMeId } from "./row-data";
 import { WaitMark } from "./WaitMark";
 
 /**
@@ -133,8 +151,8 @@ function celebrationFor(a: Approval, meId: string | null, color: string): string
  */
 function useApprovalAnswer(a: Approval): AskAnswer | null {
   const { t, i18n } = useTranslation();
-  const meId = useMeId();
-  const dir = useDirectory();
+  const meId = useRowMeId();
+  const dir = useRowDirectory();
   const when = useWhen();
   const cancelAhead = useCancelAhead();
   // Approved by me a moment ago (the card answered on screen): the check bursts once in the agent's tones.
@@ -176,7 +194,7 @@ function useApprovalAnswer(a: Approval): AskAnswer | null {
 function ApprovalGroupAsk({ items }: { items: Approval[] }) {
   const { t } = useTranslation();
   const orgId = useOrgId();
-  const dir = useDirectory();
+  const dir = useRowDirectory();
   const c = useColors();
   const toast = useToast();
   const asks = useAskStore();
@@ -194,9 +212,11 @@ function ApprovalGroupAsk({ items }: { items: Approval[] }) {
   const owner = approvalGroupWaitsFor(items, ownerId ? dir.memberById.get(ownerId)?.name : undefined);
   const deadline = cardDeadline(items);
   const leadItem = waiting[0] ?? first;
+  const decider = waiting.find((a) => a.canDecide);
   const always = approveAlwaysOn(items);
   const runs = approvalRuns(items);
   const keys = runKeys(runs);
+  const line = approvalLine(items);
   const [only] = runs;
   const single = runs.length === 1 && only && only.length > 1 ? only : null;
   const busy = one.isPending || all.isPending;
@@ -255,6 +275,7 @@ function ApprovalGroupAsk({ items }: { items: Approval[] }) {
       lead={leadItem}
       name={name}
       always={!inRun && always.has(a.id)}
+      place={line.get(a.id)}
       busy={busy}
       onApprove={() => approveOne(a)}
       onAlways={() => approveAlways(a)}
@@ -409,6 +430,7 @@ function ApprovalGroupAsk({ items }: { items: Approval[] }) {
       foot={
         <AskFoot>
           {single ? decide(single, t("approval.run.approve"), true) : decide(items, t("approval.all.approve"), false)}
+          {decider ? <WhenAsksLink approval={decider} /> : null}
         </AskFoot>
       }
     />
@@ -426,6 +448,7 @@ function ApprovalGroupItem({
   lead,
   name,
   always,
+  place,
   busy,
   onApprove,
   onAlways,
@@ -436,13 +459,16 @@ function ApprovalGroupItem({
   lead: Approval;
   name: string;
   always: boolean;
+  /** Where it stands on the card: an approved one runs after what the agent asked before it (`approvalLine`). */
+  place: LinePlace | undefined;
   busy: boolean;
   onApprove: () => void;
   onAlways: () => void;
 }) {
   const { t, i18n } = useTranslation();
-  const meId = useMeId();
-  const dir = useDirectory();
+  const when = useWhen();
+  const meId = useRowMeId();
+  const dir = useRowDirectory();
   const c = useColors();
   const reduced = useReducedMotion();
   const cancelAhead = useCancelAhead();
@@ -474,7 +500,7 @@ function ApprovalGroupItem({
             <Text variant="footnote" tone="muted">
               {[
                 decisionOutcome(t, a, meId, (id) => dir.memberById.get(id)?.name),
-                a.decidedAt && formatTime(i18n.language, a.decidedAt),
+                a.decidedAt && when.time(a.decidedAt),
               ]
                 .filter(Boolean)
                 .join(" · ")}
@@ -563,6 +589,12 @@ function ApprovalGroupItem({
                 {[
                   decisionOutcome(t, a, meId, (id) => dir.memberById.get(id)?.name),
                   scheduled && t("approval.ahead.scheduled", { when: nextLabel(i18n.language, scheduled) }),
+                  place?.waitsOn
+                    ? t("approval.line.after", {
+                        // With its place on the card: two requests of one kind tell apart by it ("1 de 2").
+                        title: `${approvalTitleText(t, place.waitsOn)} (${t("approvals.position", { n: place.waitsOnAt, total: place.count })})`,
+                      })
+                    : a.result?.notRunAfter && t("approval.line.notRun"),
                 ]
                   .filter(Boolean)
                   .join(" · ")}
@@ -595,7 +627,7 @@ function ApprovalGroupItem({
  */
 function ApprovalAsk({ approval: a }: { approval: Approval }) {
   const { t, i18n } = useTranslation();
-  const dir = useDirectory();
+  const dir = useRowDirectory();
   const asks = useAskStore();
   const origin = useOriginShort(a);
   const { org } = useOrg();
@@ -690,6 +722,7 @@ function ApprovalAsk({ approval: a }: { approval: Approval }) {
               {t("approval.waitingAdmin")}
             </Text>
           )}
+          <WhenAsksLink approval={a} />
         </AskFoot>
       }
     />
@@ -704,12 +737,12 @@ function ApprovalAsk({ approval: a }: { approval: Approval }) {
  * answered, the same card with the answer where the choices were. Anyone in the conversation may answer, unless it is for one person: then
  * everyone else reads who it waits for, and nothing to press.
  */
-export function QuestionCard({ question }: { question: AgentQuestion }) {
+export function QuestionCard({ question, asker }: { question: AgentQuestion; asker?: string }) {
   const { t, i18n } = useTranslation();
   const api = useApi();
   const orgId = useOrgId();
-  const meId = useMeId();
-  const dir = useDirectory();
+  const meId = useRowMeId();
+  const dir = useRowDirectory();
   const c = useColors();
   const toast = useToast();
   const sheet = useSheet();
@@ -732,7 +765,6 @@ export function QuestionCard({ question }: { question: AgentQuestion }) {
     return api.questions
       .answer(orgId, q.id, input)
       .then((res) => {
-        tapHaptic();
         asks?.settle(q.id);
         setAnswered({ ...res, answer: res.answer ?? ("choice" in input ? input.choice : input.text) });
       })
@@ -790,6 +822,7 @@ export function QuestionCard({ question }: { question: AgentQuestion }) {
         title={q.text}
         placeholder={t("mobile.chat.question.placeholder")}
         submitLabel={t("mobile.app.send")}
+        limit={{ max: MAX_MESSAGE_LENGTH, fix: t("mobile.choices.tooLongFix") }}
         onSubmit={(text) => answer({ text }).then(() => sheet.close())}
       />,
     );
@@ -810,48 +843,45 @@ export function QuestionCard({ question }: { question: AgentQuestion }) {
       id={q.id}
       kind="question"
       agentId={q.agentId}
+      asker={asker}
       waitsFor="you"
       lead={q.text}
       foot={
         <AskFoot>
           {choices.length > 0 ? (
             <View style={styles.opts}>
+              {/* The kit's press: a choice eases down under the finger and taps once (the answer adds none). */}
               {choices.map((choice) => {
                 const on = picking === choice;
                 return (
-                  <Pressable
+                  <PressScale
                     key={choice}
+                    to={0.98}
                     disabled={busy}
                     onPress={() => void answer({ choice })}
                     accessibilityRole="button"
                     accessibilityState={{ selected: on, disabled: busy }}
-                    style={({ pressed }) => [
-                      styles.opt,
-                      { backgroundColor: on ? c.ink : c.sunken },
-                      pressed && styles.optPressed,
-                    ]}
+                    style={[styles.optBox, { backgroundColor: on ? c.ink : c.sunken }]}
+                    contentStyle={styles.opt}
                   >
                     <Text variant="callout" style={[styles.optText, { color: on ? c.bg : c.ink }]}>
                       {choice}
                     </Text>
-                  </Pressable>
+                  </PressScale>
                 );
               })}
-              <Pressable
+              <PressScale
+                to={0.98}
                 disabled={busy}
                 onPress={write}
                 accessibilityRole="button"
-                style={({ pressed }) => [
-                  styles.opt,
-                  styles.other,
-                  { borderColor: c.line2 },
-                  pressed && styles.optPressed,
-                ]}
+                style={[styles.optBox, styles.other, { borderColor: c.line2 }]}
+                contentStyle={styles.opt}
               >
                 <Text variant="callout" tone="muted">
                   {t("ask.otherAnswer")}
                 </Text>
-              </Pressable>
+              </PressScale>
             </View>
           ) : (
             <Button
@@ -884,7 +914,7 @@ export function QuestionCard({ question }: { question: AgentQuestion }) {
 export function ThreadLink({ thread }: { thread: ThreadInfo }) {
   const { t, i18n } = useTranslation();
   const c = useColors();
-  const dir = useDirectory();
+  const dir = useRowDirectory();
   const surface = useSurface();
   const when = useWhen();
   const now = useNow(WORK_TICK_MS);
@@ -892,15 +922,19 @@ export function ThreadLink({ thread }: { thread: ThreadInfo }) {
   // How its work stands, as the web's chip says it (ADR 0084 addendum): one state, and how long in place of the time.
   const state = thread.state === "open" ? threadWorkState(thread) : null;
   const tone = state ? threadWorkTone(state) : null;
-  const held = state ? workTime(i18n.language, thread.since, now) : null;
+  // A return says when it comes ("Retorno às 00:32"), never for how long.
+  const held = state && state !== "later" ? workTime(i18n.language, thread.since, now) : null;
   return (
-    <Pressable
+    <PressScale
       onPress={() => router.push(chatHref(thread.channelId, thread.id))}
       accessibilityRole="button"
       accessibilityLabel={t("mobile.chat.replies", { count: thread.replyCount })}
       // A 36-point link under the message: the slop gives it the 44 a finger needs.
-      hitSlop={{ top: 4, bottom: 4 }}
-      style={({ pressed }) => [styles.tlink, surface, pressed && styles.pressed]}
+      hitSlop={{ top: (TOUCH - THREAD_LINK) / 2, bottom: (TOUCH - THREAD_LINK) / 2 }}
+      // As wide as its words: the press area keeps the link's size.
+      fill={false}
+      style={[styles.tlinkBox, surface]}
+      contentStyle={styles.tlink}
     >
       <View style={styles.faces}>
         {faces.map((f, i) => (
@@ -935,7 +969,7 @@ export function ThreadLink({ thread }: { thread: ThreadInfo }) {
             numberOfLines={1}
             style={[styles.bold, { color: tone === "working" ? c.agent : tone === "you" ? c.amberInk : c.muted }]}
           >
-            {threadWorkWord(t, state)}
+            {threadWorkWord(t, state, { at: thread.laterAt, locale: i18n.language, now })}
           </Text>
         </View>
       ) : null}
@@ -948,20 +982,21 @@ export function ThreadLink({ thread }: { thread: ThreadInfo }) {
               : ""
             : ` · ${when.short(thread.lastActivityAt)}`}
       </Text>
-      <Icon name="right" size={15} color={c.faint} />
-    </Pressable>
+      <Disclosure />
+    </PressScale>
   );
 }
 
+/** The thread's link under a message: 36 drawn, its target grown to 44. */
+const THREAD_LINK = 36;
+
 const styles = StyleSheet.create({
-  grow: { flex: 1, minWidth: 0 },
   shrink: { flexShrink: 1 },
   bold: { fontWeight: "600" },
   // A thread's state beside its count: the mark centred on the words' line, 4 apart.
   tstate: { flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 1 },
   flip: { transform: [{ rotate: "180deg" }] },
   pressed: { opacity: 0.85 },
-  origin: { flexDirection: "row", alignItems: "flex-start", gap: 6 },
   // Requests sharing one card: rows edge to edge across the card, each with a hairline above (never a plate in a
   // card), decided ones quieter.
   items: { marginTop: 2, marginHorizontal: -16 },
@@ -992,28 +1027,26 @@ const styles = StyleSheet.create({
   opts: { gap: 8 },
   // Under its done line, at the left edge where the line's words start.
   cancelAhead: { alignSelf: "flex-start", marginTop: -4 },
+  // A choice: its box (the color, the corner) and the row inside it, which grows with its words.
+  optBox: { borderRadius: 14 },
   opt: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    minHeight: 44,
+    minHeight: TOUCH,
     paddingHorizontal: 14,
     paddingVertical: 10,
-    borderRadius: 14,
   },
   optText: { flexShrink: 1 },
-  optPressed: { transform: [{ scale: 0.98 }] },
   other: { backgroundColor: "transparent", borderWidth: 1 },
+  tlinkBox: { alignSelf: "flex-start", maxWidth: "100%", borderRadius: 10 },
   tlink: {
-    alignSelf: "flex-start",
-    maxWidth: "100%",
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    minHeight: 36,
+    minHeight: THREAD_LINK,
     paddingLeft: 8,
     paddingRight: 12,
-    borderRadius: 10,
   },
   faces: { flexDirection: "row", marginRight: 2 },
   overlap: { marginLeft: -6 },

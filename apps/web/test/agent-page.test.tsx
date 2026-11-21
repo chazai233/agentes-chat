@@ -268,6 +268,29 @@ describe("agent page: its usage (ADR 0063)", () => {
     expect(sources.textContent).toContain("US$\u00a00,80 pagos");
   });
 
+  test("Agora lists the plan's models at a limit of their own under the account's windows", async () => {
+    const api = createFakeApi(seedState());
+    const seeded = api.agents.planUsage;
+    const at = new Date().toISOString();
+    api.agents.planUsage = async (...args) => {
+      const view = await seeded(...args);
+      const current = view.current?.usage && {
+        ...view.current,
+        provider: "opencode",
+        usage: {
+          ...view.current.usage,
+          models: { "glm-5.3": { at, until: "2099-01-01T15:40:00.000Z" }, "minimax-m3": { at, off: true as const } },
+        },
+      };
+      return { ...view, current: current ?? null };
+    };
+    await renderApp(`/org/${ORG_ID}/agents/${ADA_ID}?tab=usage`, { api });
+    await settle(8);
+    const now = screen().getByRole("region", { name: "Agora" });
+    const rows = [...now.querySelectorAll(".plan-model")].map((r) => r.textContent);
+    expect(rows).toEqual(["MiniMax M3Desligado", expect.stringMatching(/^GLM-5\.3Sem cota · renova /)]);
+  });
+
   test("a member sees the tokens and the percentages, never money", async () => {
     await go("?tab=usage", asMember());
     const month = screen().getByRole("region", { name: "Uso da Ada" });
@@ -459,23 +482,29 @@ describe("agent page: who edits what", () => {
     expect(saveBar()).toBeNull();
   });
 
-  test("the owner changes the look, audience and computer, not access; the save sends only what they may", async () => {
+  test("the owner changes the instructions, look, audience and computer, not access; the save sends only what they may", async () => {
     const { state } = await go("?tab=settings", asOwner());
     expect(screen().queryByLabelText("Nome")).toBeNull();
     expect(document.body.textContent).toContain("Você é responsável da Ada");
     // The look is right on the page: colors, then the eyes and what it wears as sliding rows.
     await click(within(screen().getByRole("group", { name: "Cor" })).getByRole("button", { name: "Rosa" }));
     expect(saveBar()?.textContent).toContain("1 alteração");
+    // Its owner edits how it works (ADR 0085 addendum of 2026-11-17): the instructions are theirs to change.
     await openTab(/^Instruções/);
-    expect(screen().queryByRole("textbox", { name: "Instruções" })).toBeNull();
-    expect(document.body.textContent).toContain("Só admins editam as instruções.");
+    await type(screen().getByRole("textbox", { name: "Instruções" }), "Instruções de Ada.\nAbre PRs pequenos.");
+    expect(saveBar()?.textContent).toContain("2 alterações");
     // Access is an admin's call, like the agent's scopes: the owner reads it.
     await openTab(/^Ferramentas/);
     expect(screen().queryByRole("radiogroup", { name: "Nível em GitHub" })).toBeNull();
     expect(document.body.textContent).toContain("Só admins dão ou tiram acessos e repositórios.");
     await click(within(saveBar() as HTMLElement).getByRole("button", { name: /^Salvar/ }));
     await settle(6);
-    expect(updates(state)).toEqual([{ appearance: { color: "rose", eyes: "round", accessory: "none" } }]);
+    expect(updates(state)).toEqual([
+      {
+        instructions: "Instruções de Ada.\nAbre PRs pequenos.",
+        appearance: { color: "rose", eyes: "round", accessory: "none" },
+      },
+    ]);
   });
 
   test("the owner puts it in and takes it out of the channels they're in; the others show as they are", async () => {
@@ -510,8 +539,8 @@ describe("agent page: inline editing and the save bar", () => {
   test("changes add up in one bar: count, names, Ver (old → new, Desfazer), Alterado on the card, Descartar", async () => {
     await go("?tab=instructions");
     const box = screen().getByRole("textbox", { name: "Instruções" });
-    // The server's cap: typing stops there, never a refusal after saving.
-    expect(box.getAttribute("maxlength")).toBe("50000");
+    // Nothing typed or pasted is cut: the limit shows near it, never a native cap.
+    expect(box.getAttribute("maxlength")).toBeNull();
     await type(box, "Instruções de Ada.\nAbre PRs pequenos.");
     const card = box.closest("section") as HTMLElement;
     expect(card.getAttribute("data-changed")).toBe("true");
@@ -976,6 +1005,7 @@ describe("agent page rules", () => {
     model: "m",
     owner: "u1",
     audience: { mode: "everyone", userIds: [] },
+    editors: { mode: "owner", userIds: [], roleIds: [] },
     levels: { "connector:gh": "none", "area:skills": "read" },
     budget: null,
     channels: ["c1"],
@@ -988,6 +1018,13 @@ describe("agent page rules", () => {
     expect(changedKeys(saved, edits).map((c) => c.key)).toEqual(["name", "handle", "levels:connector:gh"]);
     expect(changedKeys(saved, revertKey(edits, "levels:connector:gh")).map((c) => c.key)).toEqual(["name", "handle"]);
     expect(changedKeys(saved, { budget: "40" }).map((c) => c.key)).toEqual(["budget"]);
+    // "Who can edit": whom it names counts; the second choice with nobody picked names nobody, as the first.
+    const someone = { editors: { mode: "people" as const, userIds: ["u2"], roleIds: [] } };
+    expect(changedKeys(saved, someone).map((c) => c.key)).toEqual(["editors"]);
+    expect(changedKeys(saved, revertKey(someone, "editors"))).toEqual([]);
+    expect(changedKeys(saved, { editors: { mode: "people", userIds: [], roleIds: [] } })).toEqual([]);
+    // Nothing saved to compare with (the page still loading it): no change.
+    expect(changedKeys({ ...saved, editors: undefined }, someone)).toEqual([]);
     expect(changedKeys(saved, { audience: { mode: "people", userIds: [] } }).map((c) => c.key)).toEqual(["audience"]);
   });
 

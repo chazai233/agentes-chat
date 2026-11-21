@@ -1,162 +1,196 @@
-import { type ArtifactDetail, useApi, useArtifact } from "@agenteschat/client";
+import { type ArtifactDetail, isLiveFileKind, useApi, useArtifact } from "@agenteschat/client";
 import { formatJson, highlightCode } from "@agenteschat/client/lib/code";
-import { isJsonFile } from "@agenteschat/client/lib/files";
+import { isJsonFile, mediaKindOfArtifact } from "@agenteschat/client/lib/files";
+import { isolatedPage } from "@agenteschat/client/lib/isolated-page";
 import { useQuery } from "@tanstack/react-query";
-import { Asset } from "expo-asset";
-import { Image } from "expo-image";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ActivityIndicator, Platform, Text as RNText, ScrollView, StyleSheet, View } from "react-native";
+import { Text as RNText, ScrollView, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WebView } from "react-native-webview";
-import { Button, CARD_PAD, IconButton, SCREEN_X, Text, ToastHost, useToast } from "@/ui";
+import { Button, EmptyState, type HeaderAction, type HeaderMenuItem, SCREEN_X, systemText, useToast } from "@/ui";
+import { router } from "@/ui/navigation";
+import { ISOLATED_WEB_VIEW, STORAGE_STANDINS } from "../blocks/logic";
 import { CodeText, RawToggle } from "../chat/CodeCard";
 import { MessageText } from "../chat/MessageText";
+import { DeckPage, EditAs, SheetPage, useOfficeHtml } from "../live-files/office/OfficePages";
+import { liveRoute } from "../live-files/routes";
+import { useTalkFocus } from "../live-files/talk/hooks";
+import { FileTalkLine } from "../live-files/talk/TalkLine";
+import { chooseAction } from "../settings/parts";
+import { LoadFailed } from "../shared/FirstUse";
 import { useColors, useDirectory, useOrgId } from "../shared/hooks";
-import { copyText, goBack, MONO } from "../shared/parts";
+import { copyText, PushedHeader, successHaptic } from "../shared/parts";
 import { useFileActions } from "./actions";
-import { type FileInfo, fileInfo, officeKindOf } from "./logic";
-import { FileTile, useFileLine } from "./MessageFiles";
-import { fileText, useFileBytes, useRemoteFile } from "./source";
-import { VideoPlayer } from "./VideoPlayer";
+import { extensionOf, fileInfo, fileRoute, isCodeName, textChunks } from "./logic";
+import { useFileLine } from "./MessageFiles";
+import { openFile } from "./open";
+import { PageBones } from "./PageBones";
+import { PdfPages } from "./PdfPages";
+import { fileText } from "./source";
 
 /**
- * A file opened from a message: Markdown, text and code drawn by the app; PDF, Word, spreadsheets, CSV, PowerPoint and
- * ZIP on the app's own preview pages (iOS's web view draws PDFs and Office files natively, so it shows those itself);
- * pictures, video and audio in our players; anything else as its card. Top: close,
- * Copiar texto and the "…", then the name and "Documento · 4 KB · Theo" on a row of their own. Bottom: Download and
- * Send to…; the rest (open in another app, sharing settings, View in Drive) in the "…".
+ * A file opened from a message, the Drive or a link: a screen pushed with the platform's push. Its bar is the native
+ * one: back, the file's name with its line under it ("Documento · 4 KB · Theo"), and two buttons: Enviar cópia (the
+ * system's share sheet with the file) and the "…" with Compartilhar (who sees it and its link, ADR 0157), Copiar texto
+ * and Ver no Drive (the system's own menu on iOS, the app's list of the same choices on Android). Under it the file
+ * itself, the screen's whole width: Markdown and text drawn by the app, a page in a web view, a PDF page by page by
+ * the system's own renderer (`PdfPages`), an Office file as the server read it (ADR 0198: a workbook in the
+ * spreadsheet's grid, a deck's slides, a Word document's page) and an old table in the same grid, anything else says
+ * it opens in another app. Pictures and videos open straight in the picture viewer (`openFile`), live files on their
+ * own screens (ADR 0196); one reached here anyway (a file's link that didn't say what it was) goes on there, and a link
+ * to a message of a picture's or a video's conversation opens the viewer with that conversation's sheet at it (ADR
+ * 0208). A PDF has its conversation's line under it, its sheet coming up over the pages.
  */
-export function DocumentViewer({ id, version }: { id: string; version?: number }) {
-  return (
-    <ToastHost>
-      <Viewer id={id} {...(version !== undefined ? { version } : {})} />
-    </ToastHost>
-  );
-}
-
-function Viewer({ id, version }: { id: string; version?: number }) {
+export function DocumentViewer({
+  id,
+  version,
+  focusId = null,
+}: {
+  id: string;
+  version?: number;
+  /**
+   * A message of the file's conversation to open at (`?m=`, ADR 0199): handed on to a live file's own screen, opened
+   * over a PDF, or the conversation itself for a picture or a video (ADR 0208).
+   */
+  focusId?: string | null;
+}) {
   const { t } = useTranslation();
   const orgId = useOrgId();
   const dir = useDirectory();
-  const c = useColors();
-  const insets = useSafeAreaInsets();
   const line = useFileLine();
+  const toast = useToast();
   const query = useArtifact(orgId, id, version);
   const detail = query.data;
   const actions = useFileActions(detail);
-  const toast = useToast();
   const info = detail ? fileInfo(detail) : null;
   const textual = info?.view === "markdown" || info?.view === "text";
   // The page's own text, read once for the page and for Copiar texto.
   const text = useFileText(detail, textual);
-  const close = () => goBack();
+  // A PDF, drawn by the system's own renderer on both platforms.
+  const pdf = info?.view === "pdf";
+  // Only a fallback: every way into a file opens a picture or a video in the picture viewer at once, and a live file on
+  // its own screen. A link that didn't say what it was (a deep link, a name with no extension) lands here, and this
+  // screen gives way to the right one.
+  const media = info?.view === "image" || info?.view === "video" || info?.view === "live";
+  useEffect(() => {
+    if (!media || !detail) return;
+    if (isLiveFileKind(detail.kind)) router.replace(liveRoute(detail.kind, detail.id, focusId));
+    // A picture's or a video's: the viewer, its conversation's sheet coming up over it at the message (ADR 0208).
+    else if (focusId && mediaKindOfArtifact(detail)) {
+      const route = fileRoute({ id: detail.id, detail });
+      router.replace({ ...route, params: { ...route.params, m: focusId } });
+    } else openFile({ id: detail.id, detail }, undefined, { replace: true });
+  }, [media, detail, focusId]);
+  // A PDF's conversation (ADR 0208): its line under it, and a link to one of its messages opens it over the PDF.
+  const pdfTalk = !media && mediaKindOfArtifact(detail) === "pdf" ? detail : undefined;
+  useTalkFocus(pdfTalk, focusId);
+
   const copy = () => {
     if (text.data === undefined) return;
-    void copyText(text.data).then((ok) =>
-      toast(ok ? { title: t("contextMenu.textCopied"), icon: "copy" } : { title: t("mobile.app.failed"), icon: "x" }),
-    );
+    void copyText(text.data).then((ok) => {
+      if (ok) successHaptic();
+      toast(ok ? { title: t("contextMenu.textCopied"), icon: "copy" } : { title: t("mobile.app.failed"), icon: "x" });
+    });
   };
-  const pdf = info?.view === "pdf";
-  const office = info?.view === "office" ? officeKindOf(info.name, info.mime) : null;
-  // The preview pages take the bytes by message; past this size the file shows its card.
-  const fits = info ? info.size === null || info.size <= PREVIEW_MAX_BYTES : false;
+  // A block or a vote lives in its conversation, not in the Drive (ADR 0113): nothing to share or find there.
+  const inDrive = detail?.inDrive !== false;
+  const choices: HeaderMenuItem[] = [
+    ...(inDrive
+      ? [
+          {
+            icon: "person" as const,
+            sf: "person.badge.plus" as const,
+            label: t("share.button"),
+            onPress: actions.shareSheet,
+          },
+        ]
+      : []),
+    ...(textual && text.data !== undefined
+      ? [{ icon: "copy" as const, sf: "doc.on.doc" as const, label: t("contextMenu.copyText"), onPress: copy }]
+      : []),
+    ...(inDrive
+      ? [{ icon: "drive" as const, sf: "folder" as const, label: t("mobile.files.drive"), onPress: actions.drive }]
+      : []),
+  ];
+  const bar: HeaderAction[] = detail
+    ? [
+        {
+          icon: "share",
+          sf: "square.and.arrow.up",
+          label: t("mobile.files.sendCopy"),
+          disabled: actions.busy !== null,
+          onPress: () => void actions.share(),
+        },
+        ...(choices.length > 0
+          ? [
+              {
+                icon: "more" as const,
+                sf: "ellipsis" as const,
+                label: t("mobile.files.more"),
+                menu: choices,
+                // Android: the same choices in the app's list (iOS opens the menu from the button itself).
+                onPress: () => chooseAction(info?.name ?? "", choices, t("mobile.common.cancel")),
+              },
+            ]
+          : []),
+      ]
+    : [];
 
   return (
-    <View style={[styles.screen, { backgroundColor: c.bg }]}>
-      <View style={[styles.top, { paddingTop: insets.top + 8 }]}>
-        <IconButton icon="x" plate label={t("mobile.common.close")} onPress={close} />
-        <View style={styles.spacer} />
-        {textual ? (
-          <IconButton
-            icon="copy"
-            plate
-            label={t("contextMenu.copyText")}
-            onPress={copy}
-            disabled={text.data === undefined}
-          />
-        ) : null}
-        <IconButton
-          icon="more"
-          plate
-          label={t("mobile.files.more")}
-          onPress={() => actions.more(info?.view === "video")}
-          disabled={!detail}
+    <>
+      {/* The file's name as the bar's title; what it is and who sent it, the line under it. */}
+      <PushedHeader
+        title={info?.name ?? ""}
+        subtitle={info && detail ? line(info, [dir.nameOf(detail.createdBy)]) : undefined}
+        actions={bar}
+      />
+      {query.isError && !detail ? (
+        <Middle>
+          <LoadFailed onRetry={() => void query.refetch()} />
+        </Middle>
+      ) : !detail || !info || media ? (
+        // The text's shape while the file's details come (a picture or a video only until the viewer takes its place).
+        <PageBones />
+      ) : info.view === "html" ? (
+        <HtmlPage detail={detail} />
+      ) : info.view === "sheet" ? (
+        <SheetPage detail={detail} />
+      ) : info.view === "deck" ? (
+        <DeckPage detail={detail} />
+      ) : info.view === "word" ? (
+        <WordPage detail={detail} />
+      ) : textual ? (
+        <TextPage detail={detail} markdown={info.view === "markdown"} json={isJsonFile(info.name, info.mime)} />
+      ) : pdf ? (
+        <PdfPages detail={detail} />
+      ) : (
+        // A type the app doesn't draw: that it has no preview (its name is the bar's title already), and the way to
+        // open it in another app.
+        <EmptyState
+          size="page"
+          icon="file"
+          title={t("mobile.files.noPreviewTitle")}
+          subtitle={t("mobile.files.noPreview")}
+          action={
+            <Button
+              variant="secondary"
+              icon="share"
+              label={t("mobile.files.sendCopy")}
+              loading={actions.busy === "share"}
+              onPress={() => void actions.share()}
+            />
+          }
         />
-      </View>
-      {/* The name and its line under the buttons, the screen's whole width: never cut to one line beside them. */}
-      <View style={styles.heading}>
-        <Text variant="body" style={styles.bold} numberOfLines={3}>
-          {info?.name ?? ""}
-        </Text>
-        <Text variant="footnote" tone="faint">
-          {info && detail ? line(info, [dir.nameOf(detail.createdBy)]) : ""}
-        </Text>
-      </View>
-
-      <View style={styles.body}>
-        {query.isError ? (
-          <Center>
-            <Text variant="body" tone="muted">
-              {t("mobile.files.loadFailed")}
-            </Text>
-          </Center>
-        ) : !detail || !info ? (
-          <Center>
-            <ActivityIndicator color={c.faint} />
-          </Center>
-        ) : info.view === "markdown" || info.view === "text" ? (
-          <TextPage detail={detail} markdown={info.view === "markdown"} json={isJsonFile(info.name, info.mime)} />
-        ) : (pdf || (office !== null && office !== "csv")) && Platform.OS === "ios" ? (
-          <NativePage detail={detail} />
-        ) : pdf && fits ? (
-          <PreviewPage detail={detail} info={info} page="pdf" />
-        ) : office && fits ? (
-          <PreviewPage detail={detail} info={info} page="file" kind={office} />
-        ) : info.view === "archive" && fits ? (
-          <PreviewPage detail={detail} info={info} page="file" kind="zip" />
-        ) : info.view === "audio" ? (
-          <AudioPage detail={detail} info={info} />
-        ) : info.view === "video" ? (
-          <VideoPage detail={detail} info={info} />
-        ) : info.view === "image" ? (
-          <ImagePage detail={detail} info={info} />
-        ) : (
-          <BigCard info={info} />
-        )}
-      </View>
-
-      <View style={[styles.bar, { paddingBottom: insets.bottom + 12, borderTopColor: c.line2, backgroundColor: c.bg }]}>
-        {/* Download and Send to…: what a file opened on a phone is most often for; the rest in the "…". */}
-        <View style={styles.half}>
-          <Button
-            variant="secondary"
-            wide
-            icon="download"
-            label={t("mobile.files.download")}
-            disabled={!detail || (actions.busy !== null && actions.busy !== "download")}
-            loading={actions.busy === "download"}
-            onPress={() => void actions.download()}
-          />
-        </View>
-        <View style={styles.half}>
-          <Button
-            variant="primary"
-            wide
-            icon="share"
-            label={t("mobile.files.sendTo")}
-            disabled={!detail || (actions.busy !== null && actions.busy !== "share")}
-            loading={actions.busy === "share"}
-            onPress={() => void actions.share()}
-          />
-        </View>
-      </View>
-    </View>
+      )}
+      {pdfTalk ? <FileTalkLine file={pdfTalk} /> : null}
+    </>
   );
 }
 
-function Center({ children }: { children: React.ReactNode }) {
-  return <View style={styles.center}>{children}</View>;
+/** What fills the screen under the bar, centred (a failure and its retry). */
+function Middle({ children }: { children: ReactNode }) {
+  return <View style={styles.middle}>{children}</View>;
 }
 
 /** A Markdown or text file's text, loaded once per version. */
@@ -172,352 +206,122 @@ function useFileText(detail: ArtifactDetail | undefined, enabled: boolean) {
 }
 
 /**
- * Markdown with the messages' renderer, plain text in mono, on a raised page. JSON formatted and colored as a code
- * block reads it, the text as written one press away ("Original").
+ * Markdown with the messages' renderer, code colored by its extension and any other text in the app's, across the
+ * screen as a page reads. JSON formatted and colored as a code block reads it, the text as written one press away
+ * ("Original").
  */
 function TextPage({ detail, markdown, json }: { detail: ArtifactDetail; markdown: boolean; json: boolean }) {
-  const { t } = useTranslation();
   const c = useColors();
+  const insets = useSafeAreaInsets();
   const text = useFileText(detail, true);
+  // A note or a log reads as words; only code keeps the code font.
+  const code = isCodeName(fileInfo(detail).name);
   const formatted = useMemo(() => (json && text.data !== undefined ? formatJson(text.data) : null), [json, text.data]);
   const [raw, setRaw] = useState(false);
+  if (text.isError)
+    return (
+      <Middle>
+        <LoadFailed onRetry={() => void text.refetch()} />
+      </Middle>
+    );
+  if (text.data === undefined) return <PageBones />;
   return (
-    <View style={[styles.page, { backgroundColor: c.raised }]}>
-      {text.data !== undefined ? (
-        <ScrollView contentContainerStyle={styles.pageInner}>
-          {markdown ? (
-            <MessageText body={text.data} />
-          ) : formatted !== null ? (
-            <View style={styles.json}>
-              {formatted !== text.data.trim() ? <RawToggle on={raw} onPress={() => setRaw((r) => !r)} /> : null}
-              <CodeText lines={highlightCode(raw ? text.data : formatted, "json")} wrap />
-            </View>
+    <ScrollView style={styles.fill} contentContainerStyle={[styles.page, { paddingBottom: insets.bottom + 24 }]}>
+      {markdown ? (
+        <MessageText body={text.data} />
+      ) : formatted !== null ? (
+        <View style={styles.json}>
+          {formatted !== text.data.trim() ? <RawToggle on={raw} onPress={() => setRaw((r) => !r)} /> : null}
+          <CodeText lines={highlightCode(raw ? text.data : formatted, "json")} wrap />
+        </View>
+      ) : (
+        // In pieces: a long file in one text view was taller than the phone draws, and showed blank.
+        // Code is colored piece by piece: a block comment across two pieces loses its color in the second.
+        textChunks(text.data).map((piece, i) =>
+          code ? (
+            // biome-ignore lint/suspicious/noArrayIndexKey: the pieces of one fixed text, in order
+            <CodeText key={i} lines={highlightCode(piece, extensionOf(fileInfo(detail).name))} wrap />
           ) : (
-            <RNText selectable style={[styles.mono, { color: c.ink2 }]}>
-              {text.data}
+            // biome-ignore lint/suspicious/noArrayIndexKey: the pieces of one fixed text, in order
+            <RNText key={i} selectable style={[styles.prose, { color: c.ink2 }]}>
+              {piece}
             </RNText>
-          )}
-        </ScrollView>
-      ) : text.isError ? (
-        <Center>
-          <Text variant="body" tone="muted">
-            {t("mobile.files.loadFailed")}
-          </Text>
-        </Center>
-      ) : (
-        <Center>
-          <ActivityIndicator color={c.faint} />
-        </Center>
+          ),
+        )
       )}
-    </View>
+    </ScrollView>
   );
+}
+
+/** Before a page's own head: the phone's width, and stand-ins for the storage a page here has none of. */
+const PAGE_HEAD = `<meta name="viewport" content="width=device-width, initial-scale=1">${STORAGE_STANDINS}`;
+
+/**
+ * A page (an HTML file, a page an agent made) drawn as a page, apart from the app as everything an agent writes runs
+ * (ADR 0019: `ISOLATED_WEB_VIEW` with `isolatedPage`'s policy: no network, cookies, storage or way off it), at the
+ * phone's width, scrolling by itself. On white, as a page is when it sets no background of its own.
+ */
+function HtmlPage({ detail }: { detail: ArtifactDetail }) {
+  const inline = detail.content.kind === "html" ? detail.content.html : undefined;
+  const text = useFileText(detail, inline === undefined);
+  return <IsolatedHtml html={inline ?? text.data} failed={text.isError} onRetry={() => void text.refetch()} />;
 }
 
 /**
- * A PDF or Office file on an iPhone, from its short-lived link (with the session when the link is ours): iOS's web
- * view draws them natively.
+ * A Word document as the server read it (ADR 0198): clean HTML, drawn in the same isolated page as an agent's, with
+ * what it is and "Editar como documento" under it.
  */
-function NativePage({ detail }: { detail: ArtifactDetail }) {
-  const orgId = useOrgId();
-  const c = useColors();
-  const link = useRemoteFile(orgId, detail.id, detail.shownVersion);
+function WordPage({ detail }: { detail: ArtifactDetail }) {
+  const doc = useOfficeHtml(detail, true);
   return (
-    <View style={[styles.page, styles.clip, { backgroundColor: c.raised }]}>
-      {link.data ? (
-        <WebView
-          source={{ uri: link.data.uri, headers: link.data.headers }}
-          originWhitelist={["https://*", "http://*"]}
-          javaScriptEnabled={false}
-          startInLoadingState
-          renderLoading={() => (
-            <Center>
-              <ActivityIndicator color={c.faint} />
-            </Center>
-          )}
-          style={styles.web}
-        />
-      ) : (
-        <Center>
-          <ActivityIndicator color={c.faint} />
-        </Center>
-      )}
+    <View style={styles.fill}>
+      <IsolatedHtml html={doc.html} failed={doc.failed} onRetry={doc.retry} />
+      <EditAs detail={detail} view="word" />
+      <BottomRoom />
     </View>
   );
 }
 
-/**
- * The biggest file a preview page draws: the bytes cross to the web view as text (a third larger), held twice for a
- * moment. Past it, the file's card and Compartilhar.
- */
-const PREVIEW_MAX_BYTES = 40 * 1024 * 1024;
-
-/** Rows a sheet shows at most on the preview page. */
-const SHEET_ROWS = 1000;
-
-/**
- * The app's preview pages, each one self-contained HTML in the app (see their READMEs): pdf.js for PDFs
- * (scripts/pdfjs), and Word, spreadsheets, CSV, PowerPoint and ZIP (scripts/preview).
- */
-const PAGES = {
-  pdf: require("../../../assets/pdfjs/viewer.html"),
-  file: require("../../../assets/preview/viewer.html"),
-} as const;
-type PageName = keyof typeof PAGES;
-
-/** A preview page as a file on the phone, copied out of the app once. */
-function usePage(name: PageName) {
-  return useQuery({
-    queryKey: ["preview-page", name] as const,
-    queryFn: async () => {
-      const asset = Asset.fromModule(PAGES[name]);
-      await asset.downloadAsync();
-      if (!asset.localUri) throw new Error("preview page missing");
-      return asset.localUri;
-    },
-    staleTime: Number.POSITIVE_INFINITY,
-    gcTime: Number.POSITIVE_INFINITY,
-  });
+/** The home indicator's room under a bar at the screen's foot. */
+function BottomRoom() {
+  const c = useColors();
+  const insets = useSafeAreaInsets();
+  return <View style={{ height: insets.bottom, backgroundColor: c.bg }} />;
 }
 
-/**
- * A file drawn by one of the app's preview pages: the page loads from the app's own files, reaches no network (its
- * content policy says so), and gets the bytes by message once it says it's ready. PDFs page by page with pinch zoom;
- * Word as pages; sheets as a grid with a tab per sheet; slides one under another; a ZIP's folders and files. A file
- * the page can't read shows its card.
- */
-function PreviewPage({
-  detail,
-  info,
-  page: name,
-  kind,
-}: {
-  detail: ArtifactDetail;
-  info: FileInfo;
-  page: PageName;
-  kind?: "docx" | "sheet" | "csv" | "pptx" | "zip";
-}) {
-  const { t } = useTranslation();
-  const orgId = useOrgId();
-  const c = useColors();
-  const page = usePage(name);
-  const bytes = useFileBytes(orgId, detail, true);
-  const web = useRef<WebView<object>>(null);
-  // Counts the page's "ready"s: a page that loads again (its process restarted) gets the bytes again.
-  const [ready, setReady] = useState(0);
-  // Why the file shows its card instead: the page's own error, or the web view's.
-  const [failed, setFailed] = useState<string | null>(null);
-  const sent = useRef(false);
-
-  useEffect(() => {
-    if (ready === 0 || bytes.data === undefined || sent.current) return;
-    sent.current = true;
-    const msg = name === "pdf" ? { type: "pdf", data: bytes.data } : { type: "file", kind, data: bytes.data };
-    web.current?.postMessage(JSON.stringify(msg));
-  }, [ready, bytes.data, name, kind]);
-
-  const uri = useMemo(() => {
-    if (!page.data) return null;
-    const q = new URLSearchParams({
-      bg: c.sunken,
-      ink: c.ink,
-      muted: c.faint,
-      line: c.line2,
-      raised: c.raised,
-      loading: t("common.loading"),
-      failed: t("mobile.files.loadFailed"),
-      rowsCut: t("mobile.files.rowsCut", { rows: SHEET_ROWS }),
-      empty: t("mobile.files.sheetEmpty"),
-      maxRows: String(SHEET_ROWS),
-    });
-    return `${page.data}?${q.toString()}`;
-  }, [page.data, c.sunken, c.ink, c.faint, c.line2, c.raised, t]);
-
-  const reason =
-    failed ??
-    (bytes.isError ? `download: ${errorText(bytes.error)}` : null) ??
-    (page.isError ? `page: ${errorText(page.error)}` : null);
-  if (reason !== null) return <BigCard info={info} reason={reason} />;
+/** HTML in the isolated web view (see `HtmlPage`), its shape while it comes, why it didn't. */
+function IsolatedHtml({ html, failed, onRetry }: { html: string | undefined; failed: boolean; onRetry: () => void }) {
+  const page = useMemo(() => (html !== undefined ? isolatedPage(html, PAGE_HEAD) : null), [html]);
+  // A page the system ended (long in the background) comes back.
+  const [life, setLife] = useState(0);
+  if (page === null)
+    return failed ? (
+      <Middle>
+        <LoadFailed onRetry={onRetry} />
+      </Middle>
+    ) : (
+      <PageBones />
+    );
   return (
-    <View style={[styles.page, styles.clip, { backgroundColor: c.sunken }]}>
-      {uri && page.data ? (
-        <WebView
-          ref={web}
-          source={{ uri }}
-          originWhitelist={["file://*"]}
-          // Only the page itself: a link inside the file never navigates the view away.
-          onShouldStartLoadWithRequest={(r) => r.url.startsWith(page.data as string)}
-          javaScriptEnabled
-          allowFileAccess
-          onError={(e) => setFailed(`view: ${e.nativeEvent.description || e.nativeEvent.code}`)}
-          onMessage={(e) => {
-            let msg: { type?: string; message?: string } | null = null;
-            try {
-              msg = JSON.parse(e.nativeEvent.data) as { type?: string; message?: string };
-            } catch {
-              return;
-            }
-            if (msg?.type === "ready") {
-              sent.current = false;
-              setReady((n) => n + 1);
-            } else if (msg?.type === "error") setFailed(`page: ${msg.message ?? ""}`);
-          }}
-          style={styles.web}
-        />
-      ) : (
-        <Center>
-          <ActivityIndicator color={c.faint} />
-        </Center>
-      )}
-    </View>
-  );
-}
-
-/** An audio file: the video player playing sound alone, the file's tile in the middle. */
-function AudioPage({ detail, info }: { detail: ArtifactDetail; info: FileInfo }) {
-  const orgId = useOrgId();
-  const c = useColors();
-  const link = useRemoteFile(orgId, detail.id, detail.shownVersion);
-  const [failed, setFailed] = useState(false);
-  const source = useMemo(
-    () => (link.data ? { uri: link.data.uri, ...(link.data.headers ? { headers: link.data.headers } : {}) } : null),
-    [link.data],
-  );
-  const cover = useMemo(() => ({ cover: <FileTile ext={info.ext} size="lg" /> }), [info.ext]);
-  if (failed || link.isError) return <BigCard info={info} />;
-  return (
-    <View style={[styles.page, styles.clip, styles.picture]}>
-      {source ? (
-        <VideoPlayer
-          key={source.uri}
-          variant="screen"
-          source={source}
-          name={info.name}
-          audio={cover}
-          onFailed={() => setFailed(true)}
-        />
-      ) : (
-        <Center>
-          <ActivityIndicator color={c.faint} />
-        </Center>
-      )}
-    </View>
-  );
-}
-
-/** A picture, whole on the page (the picture viewer, with its zoom, opens from the chat and the Drive's cards). */
-function ImagePage({ detail, info }: { detail: ArtifactDetail; info: FileInfo }) {
-  const orgId = useOrgId();
-  const c = useColors();
-  const link = useRemoteFile(orgId, detail.id, detail.shownVersion);
-  const [failed, setFailed] = useState(false);
-  if (failed || link.isError) return <BigCard info={info} />;
-  return (
-    <View style={[styles.page, styles.clip, styles.picture, { backgroundColor: c.sunken }]}>
-      {link.data ? (
-        <Image
-          source={{ uri: link.data.uri, headers: link.data.headers, cacheKey: `${detail.id}@${detail.shownVersion}` }}
-          contentFit="contain"
-          transition={160}
-          style={StyleSheet.absoluteFill}
-          onError={() => setFailed(true)}
-          accessibilityLabel={info.name}
-        />
-      ) : (
-        <Center>
-          <ActivityIndicator color={c.faint} />
-        </Center>
-      )}
-    </View>
-  );
-}
-
-/** A video, filling the screen between the top and the bar; one this phone can't play shows its card. */
-function VideoPage({ detail, info }: { detail: ArtifactDetail; info: FileInfo }) {
-  const orgId = useOrgId();
-  const c = useColors();
-  const link = useRemoteFile(orgId, detail.id, detail.shownVersion);
-  const [failed, setFailed] = useState(false);
-  const source = useMemo(
-    () => (link.data ? { uri: link.data.uri, ...(link.data.headers ? { headers: link.data.headers } : {}) } : null),
-    [link.data],
-  );
-  if (failed || link.isError) return <BigCard info={info} />;
-  return (
-    <View style={[styles.page, styles.clip, styles.video]}>
-      {source ? (
-        <VideoPlayer
-          key={source.uri}
-          variant="screen"
-          source={source}
-          name={info.name}
-          onFailed={() => setFailed(true)}
-        />
-      ) : (
-        <Center>
-          <ActivityIndicator color={c.faint} />
-        </Center>
-      )}
-    </View>
-  );
-}
-
-/** An error's words for the card's small print. */
-const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
-
-/**
- * A type the app doesn't draw: its card, big, and Compartilhar opens it elsewhere. A preview that failed adds why, in
- * small print (selectable, so it can be copied into a bug report).
- */
-function BigCard({ info, reason }: { info: FileInfo; reason?: string }) {
-  const { t } = useTranslation();
-  const c = useColors();
-  const line = useFileLine();
-  return (
-    <Center>
-      <FileTile ext={info.ext} size="lg" />
-      <Text variant="title" style={styles.bigName} numberOfLines={3}>
-        {info.name}
-      </Text>
-      <Text variant="footnote" tone="faint">
-        {line(info)}
-      </Text>
-      <Text variant="small" tone="muted" style={styles.note}>
-        {t("mobile.files.noPreview")}
-      </Text>
-      {reason ? (
-        <RNText selectable style={[styles.reason, { color: c.faint }]}>
-          {reason}
-        </RNText>
-      ) : null}
-    </Center>
+    <WebView
+      key={life}
+      source={{ html: page }}
+      {...ISOLATED_WEB_VIEW}
+      startInLoadingState
+      renderLoading={() => <PageBones cover />}
+      onContentProcessDidTerminate={() => setLife((n) => n + 1)}
+      onRenderProcessGone={() => setLife((n) => n + 1)}
+      style={[styles.fill, styles.white]}
+    />
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1 },
-  top: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14, paddingBottom: 10 },
-  spacer: { flex: 1 },
-  heading: { gap: 2, paddingHorizontal: SCREEN_X, paddingBottom: 8 },
-  bold: { fontWeight: "600" },
-  body: { flex: 1 },
-  center: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 32, gap: 6 },
-  page: { flex: 1, marginTop: 4, marginHorizontal: 16, borderTopLeftRadius: 14, borderTopRightRadius: 14 },
-  clip: { overflow: "hidden" },
-  pageInner: { paddingHorizontal: CARD_PAD, paddingTop: CARD_PAD, paddingBottom: 32 },
-  mono: { fontFamily: MONO, fontSize: 13, lineHeight: 19 },
+  fill: { flex: 1 },
+  middle: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: SCREEN_X },
+  page: { paddingHorizontal: SCREEN_X, paddingTop: 12 },
+  white: { backgroundColor: "#fff" },
+  // The app's body, as a message's words.
+  prose: systemText("body"),
   json: { gap: 10, alignItems: "flex-start" },
-  web: { flex: 1, backgroundColor: "transparent" },
-  video: { backgroundColor: "#000", borderBottomLeftRadius: 14, borderBottomRightRadius: 14, marginBottom: 12 },
-  picture: { borderBottomLeftRadius: 14, borderBottomRightRadius: 14, marginBottom: 12 },
-  bigName: { marginTop: 14, textAlign: "center" },
-  note: { marginTop: 10, textAlign: "center" },
-  reason: { marginTop: 8, fontFamily: MONO, fontSize: 11, lineHeight: 15, textAlign: "center" },
-  bar: {
-    flexDirection: "row",
-    gap: 10,
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
-  half: { flex: 1 },
 });

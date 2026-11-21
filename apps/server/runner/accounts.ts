@@ -1,10 +1,21 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import type { EventEmitter } from "node:events";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import {
+  accessSync,
+  chmodSync,
+  constants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+} from "node:fs";
 import { chmod, lchown, lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { AGENT_WORKER_HOMES } from "@agenteschat/adapters/command-policy";
+import { AGENT_WORKER_HOMES, GROK_ACCOUNT_HOMES } from "@agenteschat/adapters/command-policy";
 import {
   ACCOUNT_KINDS,
   ACCOUNT_LOGIN_TTL_MS,
@@ -14,6 +25,7 @@ import {
   type AuthMethod,
   accountCodeAad,
   CURSOR_KEY_PROVIDER,
+  type CursorModelInfo,
   isAccountId,
   isAccountKind,
   isAuthMethod,
@@ -43,11 +55,12 @@ import {
   planModel,
   planOf,
 } from "@agenteschat/providers/plans";
-import type { Launcher } from "./agent-users";
+import { type Launcher, PROBE_AGENT_UID } from "./agent-users";
 import {
   AGY_SIGN_IN_FILE,
   type AgySignIn,
   agyAuthOf,
+  agyKeychain,
   agyRuntimeDir,
   agySignInFrom,
   agySignInOf,
@@ -67,6 +80,8 @@ import {
   GROK_BIN,
   isExecutable,
   OPENCODE_BIN,
+  parseAgyModels,
+  parseGrokModels,
   resolveCommand,
 } from "./executors";
 import { readSmallJson, writeJson } from "./json-file";
@@ -75,11 +90,13 @@ import {
   checkClaudeToken,
   codexUsage,
   fetchPlanKeyUsage,
+  oldestRead,
   probeClaudeUsage,
   probeCodexUsage,
   usageCrossed,
   withRateLimit,
 } from "./plan-usage";
+import { type RunCommand, runSync } from "./service";
 import type { TaskSecrets } from "./tasks";
 
 /**
@@ -291,6 +308,7 @@ export function accountEnv(kind: AccountKind, dir: string, base: NodeJS.ProcessE
     delete env.DISPLAY;
     delete env.SSH_AUTH_SOCK;
     Object.assign(env, AGY_QUIET_ENV);
+    if (process.platform === "darwin") agyKeychain(dir);
   }
   return env;
 }
@@ -424,6 +442,8 @@ export type AccountGrant =
   | { kind: "codex_auth"; auth: string }
   /** A Gemini sign-in for all agents: what root's Antigravity CLI keeps, copied in for each turn (`holdAgySignIn`). */
   | ({ kind: "agy_auth" } & AgySignIn)
+  /** A Grok Build sign-in for all agents: root's `auth.json`, copied in (`placeGrokAuth`), refreshed copies coming back. */
+  | { kind: "grok_auth"; auth: string }
   /** A Claude sign-in several agents share: its CLI is root's, so a task only prepares here (`tasks.ts`). */
   | { kind: "hosted" }
   | { kind: "none" };
@@ -441,6 +461,8 @@ export function grantOf(v: unknown): AccountGrant | null {
   }
   const agy = g?.kind === "agy_auth" ? agySignInFrom(g) : null;
   if (agy) return { kind: "agy_auth", ...agy };
+  const grok = g?.kind === "grok_auth" ? grokAuthOf(g.auth) : null;
+  if (grok) return { kind: "grok_auth", auth: grok.text };
   const auth = g?.kind === "codex_auth" ? codexAuthOf(g.auth) : null;
   return auth ? { kind: "codex_auth", auth: auth.text } : null;
 }
@@ -487,6 +509,12 @@ export function codexAuthOf(text: unknown): CodexAuth | null {
   };
 }
 
+/** Root's copy of a ChatGPT sign-in is safe to read limits with: Codex won't refresh it within the next hour. */
+export function codexProbeSafe(dir: string, now: number) {
+  const auth = readCodexAuth(dir);
+  return auth !== null && now - auth.refreshedAt < CODEX_REFRESH_AFTER_MS - 3600_000;
+}
+
 /** A folder's Codex sign-in; null when it has none. Never through a link or a pipe. */
 export function readCodexAuth(dir: string): CodexAuth | null {
   const o = readSmallJson(path.join(dir, CODEX_AUTH_FILE), MAX_CODEX_AUTH_CHARS);
@@ -528,8 +556,160 @@ export function watchCodexAuth(home: string, granted: string, send: (auth: strin
   };
 }
 
+/**
+ * The CLIs whose models are what an account signed in here lists (`AccountManager.listedModels`): the computer's own
+ * `grok models` and `agy models` are signed out, so its look finds none.
+ */
+export type ListingKind = "grok" | "antigravity";
+
+/** Beside the account folders: what each account signed in here listed, by its id (`AccountManager.listedModels`). */
+const LISTED_MODELS_FILE: Record<ListingKind, string> = { grok: "grok-models.json", antigravity: "agy-models.json" };
+
+/** A status look's output read as the models the CLI lists to that account. */
+const LISTED_BY: Record<ListingKind, (stdout: string) => CursorModelInfo[]> = {
+  grok: parseGrokModels,
+  antigravity: parseAgyModels,
+};
+
+const isListingKind = (kind: AccountKind): kind is ListingKind => kind === "grok" || kind === "antigravity";
+
+/** Only what reads as models: anything else a file holds is skipped. */
+const modelsIn = (v: unknown): CursorModelInfo[] =>
+  Array.isArray(v) ? v.filter((m): m is CursorModelInfo => typeof m?.id === "string") : [];
+
+/**
+ * Grok Build keeps its sign-in in `GROK_HOME/auth.json`, an entry per issuer: the grok.com one under
+ * `https://accounts.x.ai/sign-in`, with the session's bearer (`key`), its `refresh_token` and `expires_at` (RFC 3339).
+ * Its agent id (`GROK_HOME/agent_id`) goes in a header of its own and takes no part in signing in: the token works
+ * from any folder, which is what lending it to another agent rests on (probe: two fresh `GROK_HOME`s, one copied
+ * `auth.json`, both sent that bearer to the chat proxy; ADR 0142 §4, amended by ADR 0059 §2).
+ */
+const GROK_AUTH_FILE = "auth.json";
+const MAX_GROK_AUTH_CHARS = 64_000;
+/** How long an access token lasts (7 days, its docs say): a copy dated further ahead than this isn't one. */
+export const GROK_TOKEN_MAX_MS = 8 * 24 * 3600_000;
+
+export interface GrokAuth {
+  /** The whole store, as JSON: another issuer's entry in it (a key's) stays. */
+  text: string;
+  /** Where its session entry sits (`https://accounts.x.ai/sign-in` for a grok.com sign-in). */
+  issuer: string;
+  /** That entry, as it is. */
+  entry: Record<string, unknown>;
+  /** The account it signs in to: its `user_id`, else its email. */
+  userId: string;
+  email: string;
+  /** Its `expires_at` (0 when it says none). */
+  expiresAt: number;
+  refreshToken: string;
+}
+
+/** The two entries sign in to the same account (a `user_id` said by both, else the email). */
+const sameGrokAccount = (a: GrokAuth, b: GrokAuth) =>
+  a.userId && b.userId ? a.userId === b.userId : !!a.email && a.email.toLowerCase() === b.email.toLowerCase();
+
+/**
+ * A Grok Build `auth.json` (its text) that signs in to grok.com: the newest entry with a session token, a refresh
+ * token and no `auth_mode: "api_key"` (a key is the CLI's own auth, never an account's sign-in). Null otherwise.
+ */
+export function grokAuthOf(text: unknown): GrokAuth | null {
+  if (typeof text !== "string" || text.length > MAX_GROK_AUTH_CHARS) return null;
+  let o: unknown;
+  try {
+    o = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!o || typeof o !== "object" || Array.isArray(o)) return null;
+  const store = o as Record<string, unknown>;
+  let best: GrokAuth | null = null;
+  for (const [issuer, v] of Object.entries(store)) {
+    const e = (v && typeof v === "object" && !Array.isArray(v) ? v : null) as Record<string, unknown> | null;
+    if (!e || typeof e.key !== "string" || !e.key) continue;
+    if (typeof e.refresh_token !== "string" || !e.refresh_token) continue;
+    if (e.auth_mode === "api_key") continue;
+    const at = Date.parse(String(e.expires_at ?? ""));
+    const auth: GrokAuth = {
+      text: JSON.stringify(o),
+      issuer,
+      entry: e,
+      userId: typeof e.user_id === "string" ? e.user_id : "",
+      email: typeof e.email === "string" ? e.email : "",
+      expiresAt: Number.isFinite(at) ? at : 0,
+      refreshToken: e.refresh_token,
+    };
+    if (!best || auth.expiresAt > best.expiresAt) best = auth;
+  }
+  return best;
+}
+
+/** The store a folder holds (`{}` for none yet), read as root reads what an agent's user may have written. */
+const grokStoreOf = (dir: string) => {
+  const o = readSmallJson(path.join(dir, GROK_AUTH_FILE), MAX_GROK_AUTH_CHARS);
+  return o && typeof o === "object" && !Array.isArray(o) ? (o as Record<string, unknown>) : {};
+};
+
+/** A folder's Grok sign-in; null when it has none. Never through a link or a pipe. */
+export function readGrokAuth(dir: string): GrokAuth | null {
+  return grokAuthOf(JSON.stringify(grokStoreOf(dir)));
+}
+
+/**
+ * In an agent's worker: root's copy of a sign-in for all agents goes into the agent's own `GROK_HOME`, unless what
+ * is there is newer (a refresh this agent's Grok made, on its way back to root). Another issuer's entry in the store
+ * stays: only this account's is replaced.
+ */
+export function placeGrokAuth(home: string, auth: string) {
+  const granted = grokAuthOf(auth);
+  if (!granted) return;
+  const store = grokStoreOf(home);
+  const here = grokAuthOf(JSON.stringify(store));
+  if (here && here.issuer === granted.issuer && sameGrokAccount(here, granted) && here.expiresAt >= granted.expiresAt)
+    return;
+  store[granted.issuer] = granted.entry;
+  writeJson(path.join(home, GROK_AUTH_FILE), store);
+}
+
+/**
+ * In an agent's worker, while a request runs on a sign-in root keeps: the agent's copy, each time its Grok refreshed
+ * it (a later `expires_at`), goes back (`send`) so root hands the refreshed one to the next turn of any agent. A
+ * refresh rotates the refresh token, so the others need it soon — Grok Build's own store takes a lock per folder and
+ * adopts a sibling copy's rotated token (`auth.json.lock`), which is what makes copies of one sign-in safe.
+ */
+export function watchGrokAuth(home: string, granted: string, send: (auth: string) => void, everyMs = 2000) {
+  let last = grokAuthOf(granted)?.expiresAt ?? 0;
+  const look = () => {
+    const now = readGrokAuth(home);
+    if (!now || now.expiresAt <= last) return;
+    last = now.expiresAt;
+    send(now.text);
+  };
+  const timer = setInterval(look, everyMs);
+  timer.unref?.();
+  return {
+    stop() {
+      clearInterval(timer);
+      look();
+    },
+  };
+}
+
 /** System mode: the account folders, outside root's home (its parents 711) so an agent's user reaches the one lent to it. */
 export const SYSTEM_ACCOUNTS_ROOT = path.join(AGENT_WORKER_HOMES, "accounts");
+
+/**
+ * System mode, Linux: what Grok Build's `workspace` sandbox does first, as a stand-in agent's user: bubblewrap binds
+ * each folder above `GROK_HOME`, and gives up when one of them is closed to that user. Null when it starts; else what
+ * it said. No bubblewrap is a failure too: Grok Build refuses to start without it.
+ */
+export function grokSandboxFails(dir: string, run: RunCommand = runSync): string | null {
+  const above: string[] = [];
+  for (let d = path.dirname(dir); d !== path.dirname(d); d = path.dirname(d)) above.unshift(d);
+  const as = [`--reuid=${PROBE_AGENT_UID}`, `--regid=${PROBE_AGENT_UID}`, "--clear-groups", "--"];
+  const binds = above.flatMap((d) => ["--bind", d, d]);
+  const r = run("/usr/bin/setpriv", [...as, "bwrap", "--bind", "/", "/", ...binds, "--", "/bin/true"]);
+  return r.code === 0 ? null : (saidIn(r.output) ?? `bubblewrap exited with code ${r.code}`);
+}
 
 /** A key account's plan and key (`provider.json`); null when the folder isn't one. Never through a link or a pipe. */
 export async function planKeyOf(dir: string): Promise<{ provider: PlanId; key: string } | null> {
@@ -574,11 +754,11 @@ export function agentAccountHome(home: string, kind: AccountKind, id: string): s
 }
 
 /** System mode, in an agent's worker: the account folders lent to this agent's user; any other is missing. */
-export function lentAccounts(root = SYSTEM_ACCOUNTS_ROOT) {
+export function lentAccounts(root = SYSTEM_ACCOUNTS_ROOT, grokRoot = GROK_ACCOUNT_HOMES) {
   return {
     accountDir(kind: AccountKind, id: string): string | null {
       if (!isAccountKind(kind) || !isAccountId(id)) return null;
-      const dir = path.join(root, kind, id);
+      const dir = kind === "grok" ? path.join(grokRoot, id) : path.join(root, kind, id);
       try {
         accessSync(dir, constants.R_OK | constants.W_OK | constants.X_OK);
         return statSync(dir).isDirectory() ? dir : null;
@@ -598,6 +778,8 @@ export interface AccountFolders {
   agentHome?(kind: AccountKind, id: string): string | null;
   /** System mode, in a worker: a refreshed ChatGPT sign-in root keeps goes back to root (`watchCodexAuth`). */
   codexAuth?(id: string, auth: string): void;
+  /** System mode, in a worker: a refreshed Grok Build sign-in root keeps goes back to root (`watchGrokAuth`). */
+  grokAuth?(id: string, auth: string): void;
 }
 
 /** What a CLI signs in with on an account: the folder that is its home, and what root handed over for it. */
@@ -640,6 +822,11 @@ export async function accountSignIn(
   // ponytail: no copy comes back to root, since Google's refresh answers carry no new refresh token; take refreshed
   // copies back as Codex's are if they ever do.
   if (grant?.kind === "agy_auth") release = holdAgySignIn(home, grant);
+  if (grant?.kind === "grok_auth") {
+    placeGrokAuth(home, grant.auth);
+    const send = folders?.grokAuth?.bind(folders);
+    if (send) release = watchGrokAuth(home, grant.auth, (auth) => send(id, auth)).stop;
+  }
   const planKey =
     grant?.kind === "key" ? { provider: grant.provider, key: grant.key } : grant ? null : await planKeyOf(home);
   return {
@@ -802,7 +989,11 @@ export class Screen {
   private saved: [number, number] = [0, 0];
   private rest = "";
 
-  constructor(private readonly rows: number = TOKEN_TERMINAL.rows) {}
+  /** `beforeErase` runs before each escape that erases cells, with what the screen showed until then. */
+  constructor(
+    private readonly rows: number = TOKEN_TERMINAL.rows,
+    private readonly beforeErase?: () => void,
+  ) {}
 
   write(chunk: string) {
     const s = this.rest + chunk;
@@ -870,6 +1061,7 @@ export class Screen {
     const [a = 0, b = 0] = params.split(";").map((p) => Number.parseInt(p, 10) || 0);
     const n = Math.max(1, a);
     const l = () => this.line();
+    if ("JKXP".includes(m[2])) this.beforeErase?.();
     switch (m[2]) {
       case "A":
         this.r = Math.max(0, this.r - n);
@@ -1215,7 +1407,14 @@ export interface AccountManagerOptions {
   onChange?: () => void;
   /** System mode: folders are lent to agents' users (`lendTo`); `chown` never follows a link (tests: a fake). */
   lending?: { chown: Chown };
-  /** Tests: the platform (the Antigravity CLI signs in only on Linux here). */
+  /**
+   * System mode: Grok Build's folders, outside `root` (`GROK_ACCOUNT_HOMES`); what root writes beside them stays under
+   * `root`. Left out, they are under `root` as every other kind's.
+   */
+  grokRoot?: string;
+  /** System mode: whether Grok Build's sandbox starts for an agent's user above a folder (`grokSandboxFails`). */
+  grokSandbox?: (dir: string) => string | null;
+  /** Tests: the platform (the Antigravity CLI signs in on Linux and macOS here). */
   platform?: NodeJS.Platform;
   /**
    * System mode: what goes before each Claude CLI root runs on an account folder (`authEgressPrefix`), asked once;
@@ -1315,6 +1514,38 @@ export class AccountManager {
 
   constructor(private readonly opts: AccountManagerOptions) {
     this.log = opts.log ?? (() => {});
+    if (opts.lending && opts.grokRoot) this.moveGrokFolders(opts.grokRoot);
+  }
+
+  /**
+   * System mode: Grok Build's folders still under `root` go to `grokRoot`, owner and mode kept (what root wrote beside
+   * them stays). One that can't move there stays, and reads as missing until it signs in again.
+   */
+  private moveGrokFolders(to: string) {
+    const from = path.join(this.opts.root, "grok");
+    let names: string[];
+    try {
+      names = readdirSync(from).filter((n) => isAccountId(n) && lstatSync(path.join(from, n)).isDirectory());
+    } catch {
+      return;
+    }
+    if (names.length === 0) return;
+    try {
+      mkdirSync(to, { recursive: true, mode: 0o755 });
+      chmodSync(to, 0o755);
+    } catch (err) {
+      this.log(`grok accounts: couldn't make ${to} (${errnoCode(err) ?? "error"})`);
+      return;
+    }
+    // ponytail: a rename only; across file systems the folder stays and its account signs in again.
+    for (const id of names) {
+      try {
+        renameSync(path.join(from, id), path.join(to, id));
+        this.log(`account ${id.slice(0, 8)} (grok) moved to ${to}`);
+      } catch (err) {
+        this.log(`account ${id.slice(0, 8)} (grok): couldn't move it to ${to} (${errnoCode(err) ?? "error"})`);
+      }
+    }
   }
 
   /** `own`: the computer's own sign-in, which never goes through the auth egress group. */
@@ -1345,8 +1576,27 @@ export class AccountManager {
     return this.authPrefix() !== null;
   }
 
+  /** Where a kind's account folders are. */
+  private kindRoot(kind: AccountKind) {
+    return kind === "grok" && this.opts.grokRoot ? this.opts.grokRoot : path.join(this.opts.root, kind);
+  }
+
   private dirOf(kind: AccountKind, id: string) {
-    return path.join(this.opts.root, kind, id);
+    return path.join(this.kindRoot(kind), id);
+  }
+
+  /**
+   * The folders above a kind's account folders, with their modes. System mode: an agent's user passes through to the
+   * folder lent to it and lists nothing, except above Grok Build's, which its sandbox binds one by one.
+   */
+  private parents(kind: AccountKind): [string, number][] {
+    const closed = this.opts.lending ? 0o711 : 0o700;
+    const list: [string, number][] = [
+      [this.opts.root, closed],
+      [path.join(this.opts.root, kind), closed],
+    ];
+    if (kind === "grok" && this.opts.grokRoot) list.push([this.opts.grokRoot, 0o755]);
+    return list;
   }
 
   private env(kind: AccountKind, dir: string): NodeJS.ProcessEnv {
@@ -1471,7 +1721,8 @@ export class AccountManager {
    * system mode): a sign-in for every agent of its owner here, which root
    * keeps: Claude's through `claude setup-token` (no login hint there), a
    * plan's key as it is, ChatGPT's through `codex login` as root (`grant` hands its `auth.json` to each turn),
-   * Gemini's through `agy acp --login` as root (each turn gets a copy of its sign-in file).
+   * Gemini's through `agy acp --login` as root (each turn gets a copy of its sign-in file), Grok Build's through
+   * `grok login --device-auth` as root (`grok_auth` hands each turn a copy of its `auth.json`, protocol 67).
    * `method` (protocol 50, a Claude subscription sign-in): the one to use, or a refusal; never another one. The method
    * a sign-in uses is kept beside its folder (`<id>.method`), and signing in again another way is refused.
    */
@@ -1528,10 +1779,10 @@ export class AccountManager {
     if (kind === "opencode" && !cliKey) {
       throw new RunnerError("bad_request", "OpenCode signs in with its API key");
     }
-    // ADR 0143: elsewhere the CLI keeps every sign-in in the one keychain of the computer's user, so two accounts
+    // ADR 0143: Windows keeps every sign-in in the one Credential Manager of the computer's user, so two accounts
     // would be one.
-    if (kind === "antigravity" && (this.opts.platform ?? process.platform) !== "linux") {
-      throw new RunnerError("bad_request", "Gemini accounts sign in on Linux computers only, for now.");
+    if (kind === "antigravity" && (this.opts.platform ?? process.platform) === "win32") {
+      throw new RunnerError("bad_request", "Gemini accounts don't sign in on Windows computers yet.");
     }
     if (this.logins.get(loginId)?.state === "waiting") {
       throw new RunnerError("bad_request", "This sign-in already exists");
@@ -1548,7 +1799,7 @@ export class AccountManager {
     const forAll =
       this.opts.lending !== undefined &&
       shared &&
-      (kind === "claude_code" || kind === "codex" || kind === "antigravity");
+      (kind === "claude_code" || kind === "codex" || kind === "antigravity" || kind === "grok");
     const cliShared = forAll && canCliShare && (method === "cli_login" || keepsCliShare);
     const dir = this.dirOf(kind, loginId);
     if (again) {
@@ -1577,11 +1828,9 @@ export class AccountManager {
     // half stays in memory.
     const pair = kind === "claude_code" || kind === "antigravity" || cliKey ? await generateSecretKeyPair() : undefined;
     if (!again) {
-      // System mode: agents' users pass through to the one folder lent to each, and list nothing.
-      const parents = this.opts.lending ? 0o711 : 0o700;
-      for (const d of [this.opts.root, path.dirname(dir)]) {
-        await mkdir(d, { recursive: true, mode: parents });
-        await chmod(d, parents).catch(() => undefined);
+      for (const [d, mode] of this.parents(kind)) {
+        await mkdir(d, { recursive: true, mode });
+        await chmod(d, mode).catch(() => undefined);
       }
       // Not recursive: two sign-ins with one id can't both create it.
       await mkdir(dir, { mode: 0o700 }).catch((err: unknown) => {
@@ -1621,6 +1870,11 @@ export class AccountManager {
       timer: null,
       again,
     };
+    // The runner began to stop while this was prepared: `close` ended the sign-ins it knew, and wouldn't end this one.
+    if (this.closed) {
+      if (!again) await this.discard(kind, loginId);
+      throw new RunnerError("internal", "The runner is stopping");
+    }
     try {
       if (forAll && kind === "claude_code" && !cliShared) this.spawnInTerminal(login, ["setup-token"]);
       else if (kind === "antigravity") this.spawnInTerminal(login, LOGIN_ARGS.antigravity);
@@ -1729,7 +1983,8 @@ export class AccountManager {
   /**
    * A sign-in whose CLI needs a terminal of its own, in one. System mode's Claude sign-in for all agents
    * (`claude setup-token`) draws its screen only in a terminal: its link, and once signed in its token, are read off
-   * that screen, the token taken as soon as it is whole, since the screen may be gone when the CLI ends. The
+   * that screen, the token taken as soon as it is whole, since the screen may be gone when the CLI ends: also before
+   * each erase, as one piece read late can hold the token's last characters and the screen cleared after it. The
    * Antigravity CLI's `acp --login` reads the pasted code only from its terminal (with none it says "no controlling
    * terminal; cannot complete interactive login", 1.5.3): what it prints is read as it comes.
    */
@@ -1737,7 +1992,12 @@ export class AccountManager {
     const [file, ...pre] = this.command(login.kind);
     const env: NodeJS.ProcessEnv = { ...this.env(login.kind, login.dir), TERM: "xterm-256color" };
     // Held by the sign-in only, so the token on it goes once the sign-in settles.
-    if (login.kind === "claude_code") login.screen = new Screen();
+    if (login.kind === "claude_code") {
+      const screen = new Screen(undefined, () => {
+        login.token ??= parseSetupToken(screen.text()) ?? undefined;
+      });
+      login.screen = screen;
+    }
     const decoder = new TextDecoder();
     let eof: () => void = () => undefined;
     const lastOutput = new Promise<void>((resolve) => {
@@ -2005,7 +2265,19 @@ export class AccountManager {
         const status: { said?: string } = {};
         const info = await this.lookUp(login.kind, login.id, status);
         if (login.state !== "waiting") return;
-        if (info.loggedIn && !info.statusUnknown) {
+        const sandbox =
+          info.loggedIn && !info.statusUnknown && login.kind === "grok"
+            ? (this.opts.grokSandbox?.(login.dir) ?? null)
+            : null;
+        if (sandbox) {
+          this.failWith(
+            login,
+            "failed",
+            "sandbox",
+            `${LABEL.grok} signed in, but its sandbox can't start on this computer for an agent (${sandbox}).`,
+            sandbox,
+          );
+        } else if (info.loggedIn && !info.statusUnknown) {
           const unshared =
             login.shared && login.kind === "antigravity" ? await this.agyCopyFails(login.id, login.dir) : null;
           // Signed in again, the folder now holds that sign-in, which no agent can think with: signed out for all.
@@ -2293,16 +2565,77 @@ export class AccountManager {
             : kind === "antigravity"
               ? parseAgyStatus(r.status, `${r.stdout}\n${r.stderr}`, agyAuthOf(dir))
               : parseCodexStatus(r.status, `${r.stdout}\n${r.stderr}`);
+    if (isListingKind(kind) && status.loggedIn) this.keepListed(kind, id, LISTED_BY[kind](r.stdout));
     // Timed out, or didn't start.
     const unknown = r.status === null ? { statusUnknown: true as const } : {};
     return { id, kind, ...status, ...unknown, ...shared };
+  }
+
+  /** Per CLI, what each account signed in here last listed, by its id (`""`: an older runner's single list). */
+  private readonly listed: Partial<Record<ListingKind, Map<string, CursorModelInfo[]>>> = {};
+
+  private listedBy(kind: ListingKind): Map<string, CursorModelInfo[]> {
+    let by = this.listed[kind];
+    if (!by) {
+      const kept = readSmallJson(path.join(this.opts.root, LISTED_MODELS_FILE[kind]), 64 * 1024);
+      const entries: [string, unknown][] = Array.isArray(kept)
+        ? [["", kept]]
+        : kept && typeof kept === "object"
+          ? Object.entries(kept)
+          : [];
+      by = new Map(
+        entries
+          .filter(([id]) => id === "" || isAccountId(id))
+          .map(([id, v]) => [id, modelsIn(v)] as const)
+          .filter(([, list]) => list.length > 0),
+      );
+      this.listed[kind] = by;
+    }
+    return by;
+  }
+
+  /**
+   * The models a CLI listed to the accounts signed in here (each one's status look runs `<cli> models` in its
+   * folder), kept across restarts: a folder lent to an agent is never looked at again. Every account's once, the one
+   * listing the most first: accounts of one CLI can be on different plans (a free Google account lists no Gemini 4
+   * model), and the models offered are the computer's. A removed account's go with its folder. Undefined before any.
+   */
+  listedModels(kind: ListingKind): CursorModelInfo[] | undefined {
+    const lists = [...this.listedBy(kind)]
+      .filter(([id]) => id === "" || existsSync(this.dirOf(kind, id)))
+      .map(([, list]) => list)
+      .sort((a, b) => b.length - a.length);
+    const all = new Map<string, CursorModelInfo>();
+    for (const m of lists.flat()) if (!all.has(m.id)) all.set(m.id, m);
+    return all.size > 0 ? [...all.values()] : undefined;
+  }
+
+  /** An account's list from its look: kept (the older runner's single list goes), and the server told if it changed. */
+  private keepListed(kind: ListingKind, id: string, list: CursorModelInfo[]) {
+    if (list.length === 0) return;
+    const before = this.listedBy(kind);
+    const next = new Map<string, CursorModelInfo[]>();
+    for (const [other, was] of before) {
+      if (other === id) next.set(id, list);
+      else if (other !== "" && existsSync(this.dirOf(kind, other))) next.set(other, was);
+    }
+    if (!next.has(id)) next.set(id, list);
+    if (JSON.stringify([...next]) === JSON.stringify([...before])) return;
+    const shown = JSON.stringify(this.listedModels(kind));
+    this.listed[kind] = next;
+    try {
+      writeJson(path.join(this.opts.root, LISTED_MODELS_FILE[kind]), Object.fromEntries(next));
+    } catch {
+      // kept in memory until the next look
+    }
+    if (JSON.stringify(this.listedModels(kind)) !== shown) this.changed();
   }
 
   private async lookAll(): Promise<RunnerAccountInfo[]> {
     const found: { kind: AccountKind; id: string }[] = [];
     for (const kind of ACCOUNT_KINDS) {
       // No folder yet: no accounts. Any other failure fails the look (the server must never read it as "none left").
-      const entries = await readdir(path.join(this.opts.root, kind), { withFileTypes: true }).catch((err: unknown) => {
+      const entries = await readdir(this.kindRoot(kind), { withFileTypes: true }).catch((err: unknown) => {
         if (errnoCode(err) === "ENOENT") return [];
         throw err;
       });
@@ -2313,7 +2646,7 @@ export class AccountManager {
         if (login?.state === "waiting" && !login.again) continue;
         // A sign-in that never finished (the runner stopped meanwhile): not an account; gone once it would have
         // expired. A folder lent to an agent was signed in (and is never removed from under it here).
-        const marker = path.join(this.opts.root, kind, e.name, SIGNING_IN);
+        const marker = path.join(this.dirOf(kind, e.name), SIGNING_IN);
         const started = this.lentTo(kind, e.name) === null ? await lstat(marker).catch(() => null) : null;
         if (started) {
           if (Date.now() - started.mtimeMs > ACCOUNT_LOGIN_TTL_MS) {
@@ -2489,6 +2822,11 @@ export class AccountManager {
     if (this.isCliShared(kind, id)) return { kind: "hosted" };
     const dir = this.dirOf(kind, id);
     if (kind === "codex") return this.codexGrant(id, dir);
+    // Grok Build: its folder's whole store, another issuer's entries in it too (this folder is the account's).
+    if (kind === "grok") {
+      const auth = await this.serial(id, async () => readGrokAuth(dir), this.cliOps);
+      return auth ? { kind: "grok_auth", auth: auth.text } : { kind: "none" };
+    }
     if (kind === "antigravity") {
       const signIn = await this.agySignIn(id);
       return signIn ? { kind: "agy_auth", ...signIn } : { kind: "none" };
@@ -2554,6 +2892,28 @@ export class AccountManager {
   }
 
   /**
+   * A refreshed copy of a Grok Build sign-in for all agents, from the worker of an agent whose turn thinks with it:
+   * kept when it signs in to the same grok.com account, under the same issuer, and looks like a refresh (a later
+   * `expires_at`, a rotated refresh token, and not dated years ahead). The agent's shell writes that file too, so a
+   * copy dated far ahead would otherwise stick and refuse every genuine refresh after it. Only this account's entry
+   * replaces; another issuer's in root's store stays. True when kept.
+   */
+  keepGrokAuth(id: string, text: unknown): boolean {
+    if (!isAccountId(id) || !this.isShared("grok", id)) return false;
+    const next = grokAuthOf(text);
+    const dir = this.dirOf("grok", id);
+    const now = readGrokAuth(dir);
+    if (!next || !now || next.issuer !== now.issuer || !sameGrokAccount(now, next)) return false;
+    if (next.expiresAt <= now.expiresAt || next.refreshToken === now.refreshToken) return false;
+    if (next.expiresAt > (this.opts.now ?? Date.now)() + GROK_TOKEN_MAX_MS) return false;
+    const store = grokStoreOf(dir);
+    store[next.issuer] = next.entry;
+    writeJson(path.join(dir, GROK_AUTH_FILE), store);
+    this.log(`account ${id.slice(0, 8)} (grok, for all agents) refreshed`);
+    return true;
+  }
+
+  /**
    * A brain turn of the agent whose OS user is `uid` thinks with this account: its folder becomes that user's
    * (700), taken back from any other agent first. False when it isn't here, still signing in, or made for all
    * agents (root keeps that one, `grant`).
@@ -2567,7 +2927,7 @@ export class AccountManager {
       const now = this.lentTo(kind, id);
       if (now === uid) return true;
       if (now) await this.reclaimNow(kind, id);
-      for (const d of [this.opts.root, path.dirname(dir)]) await chmod(d, 0o711);
+      for (const [d, mode] of this.parents(kind)) await chmod(d, mode);
       // Marked before the first chown: a folder an agent's user may have written to never runs as root again.
       await writeFile(this.marker(kind, id, "lent"), String(uid), { mode: 0o600 });
       await chownTree(dir, uid, chown);
@@ -2670,7 +3030,7 @@ export class AccountManager {
       const token = recheck.includes(id);
       // A token's check goes by its own clock: a plain look at it (which reads nothing) doesn't put it off.
       const asked = (token ? this.tokenChecked : this.probed).get(id) ?? 0;
-      const known = Math.max(Date.parse(this.usage.get(id)?.at ?? "") || 0, asked);
+      const known = Math.max(oldestRead(this.usage.get(id)), asked);
       const ttl = token ? (this.opts.tokenCheckTtlMs ?? TOKEN_RECHECK_MS) : (this.opts.usageTtlMs ?? USAGE_TTL_MS);
       if (now - known < ttl) continue;
       if (token) {
@@ -2716,7 +3076,9 @@ export class AccountManager {
     if (!target) return null;
     const limits = timeoutMs ? { timeoutMs } : {};
     if (!own && this.isCliShared(target.kind, id)) {
-      return this.opts.sharedLogin?.ready() ? probeClaudeUsage({ ...this.sharedCli(id), ...limits }) : null;
+      return this.opts.sharedLogin?.ready()
+        ? this.answered(target.kind, id, await probeClaudeUsage({ ...this.sharedCli(id), ...limits }))
+        : null;
     }
     const plan = own || target.kind !== "claude_code" ? null : await planKeyOf(target.cwd);
     if (plan) {
@@ -2743,7 +3105,12 @@ export class AccountManager {
         this.usage.get(id),
       );
     }
-    if (!own && (this.lentTo(target.kind, id) !== null || shared)) return null;
+    // A ChatGPT sign-in for all agents is root's own copy: Codex reads its limits there as long as it won't refresh it
+    // (a refresh rotates the token every agent's copy holds). Without this its numbers only came from turns, so with
+    // all long work paused nothing read them again.
+    const codexReadable =
+      shared && target.kind === "codex" && codexProbeSafe(target.cwd, (this.opts.now ?? Date.now)());
+    if (!own && (this.lentTo(target.kind, id) !== null || (shared && !codexReadable))) return null;
     const probe = { command: this.command(target.kind, Boolean(own)), cwd: target.cwd, env: target.env, ...limits };
     // Cursor's CLI reports no plan usage: its turns' `usage` is all there is.
     // Nor does OpenCode's: its key's usage is on OpenCode's console. Grok Build shows its plan's only in its TUI.
@@ -2754,7 +3121,24 @@ export class AccountManager {
       const r = await runCli(probe.command, ["-p", "/usage"], probe.env, timeoutMs ?? STATUS_TIMEOUT_MS);
       return r.status === 0 ? antigravityUsage(r.stdout, "probe") : null;
     }
-    return target.kind === "codex" ? probeCodexUsage(probe) : probeClaudeUsage(probe);
+    const found = await (target.kind === "codex" ? probeCodexUsage(probe) : probeClaudeUsage(probe));
+    return own ? found : this.answered(target.kind, id, found);
+  }
+
+  /**
+   * A CLI login that refreshes itself answered its provider's usage call: the provider takes its sign-in, so a turn's
+   * refusal (`refused`) was passing (a refresh another process of the same login had just rotated, or a 401 the CLI
+   * then recovered from) and the account reads as signed in again. A sign-in another login really ended fails this
+   * call too and stays signed out. Never for a token or a key, whose readings don't prove the sign-in.
+   */
+  private async answered(kind: AccountKind, id: string, found: PlanUsage | null) {
+    if (found && existsSync(this.marker(kind, id, "invalid"))) {
+      await rm(this.marker(kind, id, "invalid"), { force: true }).catch(() => undefined);
+      this.knownLoggedIn.delete(id);
+      this.invalidate();
+      void this.refresh(true).catch(() => undefined);
+    }
+    return found;
   }
 
   /** The runner is exiting: sign-ins in progress stop and their folders go. */

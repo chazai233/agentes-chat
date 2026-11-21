@@ -1,17 +1,26 @@
-import type { ComputerSummary, EndedTask, ManagedTask } from "@agenteschat/client";
-import { useTaskManager } from "@agenteschat/client";
+import type { CanceledReturn, ComputerSummary, EndedTask, ManagedTask, PendingReturn } from "@agenteschat/client";
+import { useCancelFollowUp, useTaskManager } from "@agenteschat/client";
+import { returnClock, returnWhen } from "@agenteschat/client/lib/agent-work";
 import { listsAgent } from "@agenteschat/client/lib/audience";
+import { errorText } from "@agenteschat/client/lib/errors";
+import { formatLineTime } from "@agenteschat/client/lib/format";
 import {
   type AgentTasks,
-  activityLine,
   agentCardLine,
   agentSummary,
+  causeWords,
+  computerRoomText,
+  computersBesides,
   delegationText,
   endedState,
+  endedText,
   groupLead,
   groupTasks,
   helpersOf,
   hiddenCount,
+  returnCanceledText,
+  returnPlace,
+  shownCauses,
   taskHelping,
   taskPlace,
   taskState,
@@ -20,46 +29,43 @@ import {
   taskTitle,
   taskWhere,
   todayStart,
+  type WaitCause,
 } from "@agenteschat/client/lib/task-manager";
 import { formatDuration } from "@agenteschat/client/lib/work";
 import {
-  type AgentColor,
   Button,
   Carousel,
   Chip,
   CountChip,
+  cx,
   EmptyState,
   GroupHeading,
   Icon,
   type IconName,
+  Menu,
+  MenuItem,
   PageHeader,
   PixelSpinner,
   PixelStop,
+  ProviderLogo,
   SearchField,
   Tip,
 } from "@agenteschat/ui";
-import {
-  type ButtonHTMLAttributes,
-  type CSSProperties,
-  Fragment,
-  type ReactNode,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
+import { useNavigate } from "@tanstack/react-router";
+import { type CSSProperties, Fragment, type ReactNode, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { AgentAvatar } from "@/components/AgentAvatar";
-import { Sparkline } from "@/components/ChartBlock";
 import { QueueDialog } from "@/components/ComputerQueue";
 import { ErrorState, LoadingList } from "@/components/Loading";
 import { OpensAgent } from "@/components/OpensAgent";
 import { useOrg } from "@/components/org-context";
 import { WaitMark } from "@/components/RequestCard";
-import { colorOf } from "@/components/Sky";
 import {
   heatOf,
   ProgramStack,
+  RowName,
+  rowTip,
   StopAllConfirm,
   StopTaskButton,
   TaskMark,
@@ -68,6 +74,7 @@ import {
   taskAge,
   taskSub,
   UsingNow,
+  useOpenTask,
   useProgramText,
   useTaskStatus,
   useTaskStop,
@@ -76,28 +83,17 @@ import { TaskPanel } from "@/components/tasks/TaskPanel";
 import { useDirectory } from "@/hooks/useDirectory";
 import { useNow } from "@/hooks/useNow";
 import { useRightHandLook } from "@/hooks/useRightHandLook";
+import { useToast } from "@/lib/toast";
 import "./task-manager.css";
 
 /*
- * The task manager (ADR 0128), one page: the agents as cards with their last half hour (one chosen shows only its
- * tasks), the tasks now (asked by people, grouped by agent and folded until opened, then the routines' background
- * runs) with their state, what each uses, its time and Parar, and what ended today at the end. Every row is one line
+ * The task manager (ADR 0128), one page: what holds the work (only while something waits), the agents as filter
+ * chips (one chosen shows only its tasks), the tasks now (asked by people, grouped by agent and folded until opened, then the routines' background
+ * runs, then the returns agents set, ADR 0037) with their state, what each uses, its time and Parar, and what ended
+ * today at the end. Every row is one line
  * that ends in "…" when it doesn't fit, its words whole in its tip. No cost anywhere: here people stop work. A row or
  * an agent's card chosen gives the toolbar "Ver passos" and "Parar tarefa" / "Parar tudo de Dev".
  */
-
-/** Points on a card's line: the last half hour, one per minute. */
-const LINE_POINTS = 30;
-
-/** A row's tip: its words whole, the title first, one fact a line. */
-const rowTip = (title: string, lines: string[]) => (
-  <>
-    <b>{title}</b>
-    {lines.map((line) => (
-      <span key={line}>{line}</span>
-    ))}
-  </>
-);
 
 /** A row's stop that asks first: the square alone, its words on hover and for screen readers (`what`: whose). */
 const stopSquare = (words: string, what?: string) => (
@@ -154,16 +150,19 @@ export function TaskManagerPage({
   }, [openRun]);
   // The computer whose line is open ("Ver fila"): the line's own dialog, as a conversation's header opens it.
   const [queueOf, setQueueOf] = useState<string | null>(null);
+  const openTask = useOpenTask();
+  const toast = useToast();
+  const cancelReturn = useCancelFollowUp(org.id);
+  // The returns being canceled: their ⋯ waits on its spinner, then the row leaves.
+  const [canceling, setCanceling] = useState<ReadonlySet<string>>(() => new Set());
 
   const all = view.data?.tasks ?? [];
   const activity = view.data?.activity;
   // The computers with turns running or waiting for room (ADR 0128).
   const computers = view.data?.computers ?? [];
-  // "Cheio · 3 na fila" or "Tem espaço", and "1 trabalhando": a computer as the page lists it.
-  const computerText = (c: ComputerSummary) => {
-    const room = c.inLine > 0 ? t("taskManager.queue.full", { count: c.inLine }) : t("taskManager.queue.room");
-    return c.working > 0 ? `${room} · ${t("taskManager.working", { count: c.working })}` : room;
-  };
+  const causes = shownCauses(all);
+  // A computer with a line holds work too (each turn waits its place): a row of the same block, with Ver fila.
+  const lined = computersBesides(computers, causes).filter((c) => c.inLine > 0);
   const nameOf = (id: string) => dir.anyAgent(id)?.name ?? t("channel.unknownAgent");
   const query = q.trim().toLocaleLowerCase();
   const matches = (task: ManagedTask) => {
@@ -181,12 +180,6 @@ export function TaskManagerPage({
   const hidden = view.data?.hidden;
 
   // The cards: who has tasks, in the table's order, then who worked in the last hour; the chosen one stays.
-  const lines = useMemo(() => {
-    const out = new Map<string | null, number[]>([[null, activityLine(activity ?? {}, null, LINE_POINTS)]]);
-    for (const id of Object.keys(activity ?? {})) out.set(id, activityLine(activity ?? {}, id, LINE_POINTS));
-    return out;
-  }, [activity]);
-  const quiet = useMemo(() => Array.from({ length: LINE_POINTS }, () => 0), []);
   const cardIds: string[] = [];
   const addCard = (id: string) => {
     if (!cardIds.includes(id) && listsAgent(org, dir.anyAgent(id))) cardIds.push(id);
@@ -304,12 +297,78 @@ export function TaskManagerPage({
     (!card || e.agentId === card) &&
     (!query || `${taskTitle(t, e)} ${nameOf(e.agentId)}`.toLocaleLowerCase().includes(query));
   const ended = (view.data?.ended ?? []).filter(endedShown);
+  // The returns agents set ("Retornos"), and those canceled today, by the same card and search.
+  const returnShown = (r: Pick<PendingReturn, "agentId" | "about" | "channelName">) =>
+    (!card || r.agentId === card) &&
+    (!query || `${r.about} ${nameOf(r.agentId)} ${r.channelName ?? ""}`.toLocaleLowerCase().includes(query));
+  const followUps = (view.data?.followUps ?? []).filter(returnShown);
+  const canceledReturns = (view.data?.canceledFollowUps ?? []).filter(returnShown);
+  const openReturn = (r: PendingReturn | CanceledReturn) =>
+    openTask({ ...r, messageId: "replyMessageId" in r ? r.replyMessageId : null });
+  const cancel = (r: PendingReturn) => {
+    const mark = (on: boolean) =>
+      setCanceling((was) => {
+        const next = new Set(was);
+        if (on) next.add(r.messageId);
+        else next.delete(r.messageId);
+        return next;
+      });
+    mark(true);
+    cancelReturn.mutate(
+      { channelId: r.channelId, messageId: r.messageId },
+      { onError: (error) => toast.show(errorText(t, error), "error"), onSettled: () => mark(false) },
+    );
+  };
+  const returnsSection =
+    followUps.length > 0 ? (
+      <TaskSection title={t("taskManager.sections.returns")} count={followUps.length} tasks={[]}>
+        {followUps.map((r) => (
+          <ReturnRow
+            key={r.messageId}
+            item={r}
+            agentName={nameOf(r.agentId)}
+            now={now}
+            canceling={canceling.has(r.messageId)}
+            onOpen={() => openReturn(r)}
+            onCancel={() => cancel(r)}
+          />
+        ))}
+      </TaskSection>
+    ) : null;
+  // What ended today, the latest first: tasks and the returns that won't come.
+  const endedRows = [
+    ...ended.map((e) => ({
+      at: e.finishedAt,
+      node: (
+        <EndedRow
+          key={e.runId}
+          task={e}
+          agentName={nameOf(e.agentId)}
+          nameOf={(id) => dir.anyAgent(id)?.name}
+          meId={me.user.id}
+          selected={panel === e.runId}
+          onOpen={() => setPanel(e.runId)}
+        />
+      ),
+    })),
+    ...canceledReturns.map((r) => ({
+      at: r.canceledAt,
+      node: (
+        <CanceledReturnRow
+          key={r.messageId}
+          item={r}
+          agentName={nameOf(r.agentId)}
+          meId={me.user.id}
+          onOpen={() => openReturn(r)}
+        />
+      ),
+    })),
+  ].sort((a, b) => b.at.localeCompare(a.at));
 
   return (
     <div className="page page--list tm">
       <PageHeader
         title={t("taskManager.title")}
-        meta={t("taskManager.subtitle")}
         count={
           (working > 0 || summary.waiting > 0) && (
             <span className="tm-sum">
@@ -342,6 +401,8 @@ export function TaskManagerPage({
         }
       />
 
+      {view.data && <CapacityStrip causes={causes} lined={lined} computers={computers} onQueue={setQueueOf} />}
+
       {view.isLoading && <LoadingList count={4} avatar={false} />}
       {view.isError && !view.data && <ErrorState error={view.error} onRetry={() => void view.refetch()} />}
 
@@ -357,9 +418,6 @@ export function TaskManagerPage({
             name={t("taskManager.all")}
             tasks={all}
             hidden={hiddenCount(hidden, null)}
-            line={lines.get(null) ?? quiet}
-            color="graphite"
-            lineLabel={t("taskManager.activityAll")}
             pressed={card === null}
             onPress={() => {
               setCard(null);
@@ -374,9 +432,6 @@ export function TaskManagerPage({
               name={nameOf(id)}
               tasks={tasksOf(all, id)}
               hidden={hiddenCount(hidden, id)}
-              line={lines.get(id) ?? quiet}
-              color={colorOf(dir.anyAgent(id))}
-              lineLabel={t("taskManager.activityOf", { name: nameOf(id) })}
               pressed={card === id}
               onPress={() => {
                 setCard((c) => (c === id ? null : id));
@@ -388,39 +443,19 @@ export function TaskManagerPage({
         </Carousel>
       )}
 
-      {computers.length > 0 && (
-        <section className="tm-computers" aria-label={t("taskManager.queue.computers")}>
-          <GroupHeading title={t("taskManager.queue.computers")} count={computers.length} />
-          <ul className="tm-computers__list ac-card">
-            {computers.map((c) => (
-              <li key={c.id} className="tm-computer">
-                <span className="tm-computer__icon" aria-hidden="true">
-                  <Icon name="computer" size={18} />
-                </span>
-                <Tip className="tm-computer__text" tip={rowTip(c.name, [computerText(c)])} look="ac-msg__tip tm-tip">
-                  <b>{c.name}</b>
-                  <small>{computerText(c)}</small>
-                </Tip>
-                {/* The keys' focus and a long press open the words' tip from here: the words take no focus. */}
-                {(c.inLine > 0 || c.working > 0) && (
-                  <Tip button look="ac-msg__tip tm-tip" tip={rowTip(c.name, [computerText(c)])}>
-                    <Button variant="link" aria-label={`${t("queue.see")}: ${c.name}`} onClick={() => setQueueOf(c.id)}>
-                      {t("queue.see")}
-                    </Button>
-                  </Tip>
-                )}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
       {view.data && all.length === 0 && !hidden?.total && (
         <EmptyState size="page" agent={look} mood="deal" title={t("taskManager.empty.title")}>
           {t("taskManager.empty.body")}
         </EmptyState>
       )}
       {hidden?.total ? <p className="tm-none">{t("taskManager.hiddenLine", { count: hidden.total })}</p> : null}
+
+      {/* No task on: the returns still list, in the same table (and its width's rules). */}
+      {view.data && all.length === 0 && returnsSection && (
+        <section className="tm-now" aria-label={t("taskManager.sections.returns")}>
+          <TaskTable>{returnsSection}</TaskTable>
+        </section>
+      )}
 
       {view.data && all.length > 0 && (
         <section className="tm-now" aria-label={heading}>
@@ -453,6 +488,7 @@ export function TaskManagerPage({
               ) : (
                 <p className="tm-none">{agentCardLine(t, 0, hiddenCount(hidden, card))}</p>
               )}
+              {returnsSection}
             </TaskTable>
           ) : (
             <TaskTable>
@@ -530,6 +566,7 @@ export function TaskManagerPage({
                   {grouped.background.map((task) => row(task, "flat"))}
                 </TaskSection>
               )}
+              {returnsSection}
             </TaskTable>
           )}
         </section>
@@ -540,22 +577,11 @@ export function TaskManagerPage({
           <button type="button" className="tm-more" aria-expanded={endedOpen} onClick={() => setEndedOpen((o) => !o)}>
             <Icon name="chevronRight" size={16} className="tm-more__chevron" />
             {t("taskManager.ended.title")}
-            <CountChip size="sm">{ended.length}</CountChip>
+            <CountChip size="sm">{endedRows.length}</CountChip>
           </button>
           {endedOpen &&
-            (ended.length > 0 ? (
-              <ul className="tm-list tm-list--ended ac-card">
-                {ended.map((e) => (
-                  <EndedRow
-                    key={e.runId}
-                    task={e}
-                    agentName={nameOf(e.agentId)}
-                    meId={me.user.id}
-                    selected={panel === e.runId}
-                    onOpen={() => setPanel(e.runId)}
-                  />
-                ))}
-              </ul>
+            (endedRows.length > 0 ? (
+              <ul className="tm-list tm-list--ended ac-card">{endedRows.map((r) => r.node)}</ul>
             ) : (
               <p className="tm-none">{t("taskManager.ended.none")}</p>
             ))}
@@ -592,6 +618,87 @@ export function TaskManagerPage({
         />
       )}
     </div>
+  );
+}
+
+/**
+ * Over the cards, while work waits: what got done today and how much waits, then what holds it, one row a cause
+ * (`causeWords`) with its count and its one way out. Hidden when nothing waits.
+ */
+function CapacityStrip({
+  causes,
+  lined,
+  computers,
+  onQueue,
+}: {
+  causes: WaitCause[];
+  /** Computers with a line that aren't a cause already. */
+  lined: ComputerSummary[];
+  computers: ComputerSummary[];
+  onQueue: (machineId: string) => void;
+}) {
+  const { t, i18n } = useTranslation();
+  const { org } = useOrg();
+  const navigate = useNavigate();
+  const openTask = useOpenTask();
+  if (causes.length + lined.length === 0) return null;
+  const row = (cause: WaitCause) => {
+    const first = cause.tasks[0] as ManagedTask;
+    const words = causeWords(t, i18n.language, cause, computers);
+    if (cause.kind === "limit") {
+      const brain = first.brain && first.brain !== "model" ? first.brain : null;
+      return {
+        ...words,
+        lead: brain ? <ProviderLogo id={brain} size="xs" /> : <Icon name="clock" size={18} />,
+        act: t("taskManager.capacity.usage"),
+        onAct: () =>
+          void navigate({ to: "/org/$orgId/settings/$section", params: { orgId: org.id, section: "usage" } }),
+      };
+    }
+    if (cause.kind === "computer")
+      return {
+        ...words,
+        lead: <Icon name="computer" size={18} />,
+        act: t("taskManager.capacity.computers"),
+        onAct: () =>
+          void navigate({ to: "/org/$orgId/settings/$section", params: { orgId: org.id, section: "computers" } }),
+      };
+    return { ...words, lead: <WaitMark />, act: t("taskManager.actions.open"), onAct: () => openTask(first) };
+  };
+  return (
+    <section className="tm-causes" aria-label={t("taskManager.capacity.label")}>
+      <GroupHeading title={t("taskManager.capacity.label")} count={causes.length + lined.length} />
+      <ul className="tm-computers__list ac-card">
+        {[
+          ...causes.map((cause) => ({ key: cause.key, ...row(cause) })),
+          ...lined.map((c) => ({
+            key: c.id,
+            name: c.name,
+            fact: computerRoomText(t, c),
+            lead: <Icon name="computer" size={18} />,
+            act: t("queue.see"),
+            onAct: () => onQueue(c.id),
+          })),
+        ].map((r) => {
+          return (
+            <li key={r.key} className="tm-computer tm-cause">
+              <span className="tm-computer__icon" aria-hidden="true">
+                {r.lead}
+              </span>
+              <Tip className="tm-computer__text" tip={rowTip(r.name, [r.fact])} look="ac-msg__tip tm-tip">
+                <b>{r.name}</b>
+                <small>{r.fact}</small>
+              </Tip>
+              <Tip button look="ac-msg__tip tm-tip" tip={rowTip(r.name, [r.fact])}>
+                <Button variant="link" aria-label={`${r.act}: ${r.name}`} onClick={r.onAct}>
+                  {r.act}
+                </Button>
+              </Tip>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }
 
@@ -632,27 +739,6 @@ function TaskSection({
       <TaskWaitLines tasks={tasks} />
       <ul className="tm-list">{children}</ul>
     </section>
-  );
-}
-
-/**
- * A row's words and its press: the title, then what it is about in quiet type, on one line that ends in "…" when it
- * doesn't fit. Whole in its tip (a resting pointer, the keys' focus, a long press) and, for screen readers, in the
- * button's description: `tip` is what the row leaves out or cuts.
- */
-function RowName({
-  title,
-  sub,
-  tip,
-  ...button
-}: { title: string; sub?: string | null; tip: string[] } & ButtonHTMLAttributes<HTMLButtonElement>) {
-  return (
-    <Tip button look="ac-msg__tip tm-tip" tip={rowTip(title, tip)}>
-      <button type="button" className="tm-hit" aria-label={title} aria-description={tip.join(". ")} {...button}>
-        {title}
-        {sub && <small>{sub}</small>}
-      </button>
-    </Tip>
   );
 }
 
@@ -858,9 +944,6 @@ function AgentCard({
   name,
   tasks,
   hidden,
-  line,
-  color,
-  lineLabel,
   pressed,
   onPress,
 }: {
@@ -870,49 +953,36 @@ function AgentCard({
   tasks: ManagedTask[];
   /** Its tasks the viewer may not see. */
   hidden: number;
-  line: number[];
-  color: AgentColor;
-  lineLabel: string;
   pressed: boolean;
   onPress: () => void;
 }) {
   const { t } = useTranslation();
   const { waiting } = agentSummary(tasks);
+  const count = tasks.length + hidden;
+  const label = [
+    name,
+    agentCardLine(t, tasks.length, hidden),
+    waiting > 0 ? t("taskManager.waiting", { count: waiting }) : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
+  // A filter chip: the face, the name and how many tasks, the waiting mark when one waits on a person.
   return (
-    <div className="tm-card ac-card ac-card--interactive" data-pressed={pressed || undefined}>
-      <span className="tm-card__head">
-        {agentId ? (
-          <OpensAgent agentId={agentId}>
-            <AgentAvatar agentId={agentId} name={name} size="sm" />
-          </OpensAgent>
-        ) : (
-          <span className="tm-card__n ac-num" aria-hidden="true">
-            {tasks.length + hidden}
-          </span>
-        )}
-        <button
-          type="button"
-          className="tm-card__text"
-          aria-pressed={pressed}
-          title={waiting > 0 ? t("taskManager.waiting", { count: waiting }) : undefined}
-          onClick={onPress}
-        >
-          <b>{name}</b>
-          <small>{agentCardLine(t, tasks.length, hidden)}</small>
-        </button>
-        {waiting > 0 && (
-          <Chip
-            tone="waiting"
-            lead={<WaitMark />}
-            className="tm-card__wait"
-            aria-label={t("taskManager.waiting", { count: waiting })}
-          >
-            {waiting}
-          </Chip>
-        )}
-      </span>
-      <Sparkline values={line} color={color} label={lineLabel} />
-    </div>
+    <span className={cx("ac-filter tm-chip", pressed && "ac-filter--active")}>
+      <button
+        type="button"
+        className="ac-filter__trigger"
+        aria-pressed={pressed}
+        aria-label={label}
+        title={name}
+        onClick={onPress}
+      >
+        {agentId && <AgentAvatar agentId={agentId} name={name} size="xs" />}
+        <span className="ac-filter__text">{name}</span>
+        <span className="tm-chip__n ac-num">{count}</span>
+        {waiting > 0 && <WaitMark />}
+      </button>
+    </span>
   );
 }
 
@@ -930,24 +1000,22 @@ const ENDED_ICON: Record<"done" | "stopped" | "failed", IconName> = {
 function EndedRow({
   task,
   agentName,
+  nameOf,
   meId,
   selected,
   onOpen,
 }: {
   task: EndedTask;
   agentName: string;
+  /** An agent's name: the right hand that stopped the task at someone's word. */
+  nameOf: (agentId: string) => string | undefined;
   meId: string;
   selected: boolean;
   onOpen: () => void;
 }) {
   const { t } = useTranslation();
   const state = endedState(task);
-  const word =
-    state === "stopped"
-      ? task.stoppedBy && task.stoppedBy.userId !== meId
-        ? t("taskManager.ended.stoppedBy", { name: task.stoppedBy.name })
-        : t("taskManager.ended.stopped")
-      : t(state === "done" ? "taskManager.ended.done" : "taskManager.ended.failed");
+  const word = endedText(t, task, meId, nameOf);
   const took = formatDuration(
     t,
     Math.max(0, Date.parse(task.finishedAt) - Date.parse(task.startedAt ?? task.finishedAt)),
@@ -974,6 +1042,112 @@ function EndedRow({
         </span>
       </span>
       <span className="tm-cell tm-cell--time ac-num">{took}</span>
+    </li>
+  );
+}
+
+/**
+ * A return an agent set (ADR 0037), one line: the clock, her words and where (the agent, the conversation), when it
+ * comes ("Às 00:32"; once its time passed waiting on an answer, that), how soon, and ⋯ with "Abrir na conversa" and,
+ * for who may, "Cancelar retorno". The row opens the conversation at the reply that set it.
+ */
+function ReturnRow({
+  item,
+  agentName,
+  now,
+  canceling,
+  onOpen,
+  onCancel,
+}: {
+  item: PendingReturn;
+  agentName: string;
+  now: number;
+  canceling: boolean;
+  onOpen: () => void;
+  onCancel: () => void;
+}) {
+  const { t, i18n } = useTranslation();
+  const sub = [agentName, returnPlace(t, item)].filter(Boolean).join(" · ");
+  const state = item.held ? t("threads.status.input") : returnWhen(t, i18n.language, item.at, now, true);
+  const soon = item.held
+    ? null
+    : t("followUps.inTime", { time: formatLineTime(i18n.language, Math.max(1000, Date.parse(item.at) - now)) });
+  return (
+    <li className="tm-row" data-look="return">
+      <span className="tm-cell tm-cell--name">
+        <span className="tm-mark" aria-hidden="true">
+          <Icon name="clock" size={14} />
+        </span>
+        <RowName title={item.about} sub={sub} tip={[sub, state, soon ?? ""].filter(Boolean)} onClick={onOpen} />
+      </span>
+      <span className="tm-cell tm-cell--state">
+        <Chip icon="clock">{state}</Chip>
+      </span>
+      <span className="tm-cell tm-cell--use">
+        <span className="tm-use tm-use--none">—</span>
+      </span>
+      <span className="tm-cell tm-cell--time ac-num">{soon}</span>
+      <span className="tm-cell tm-cell--act">
+        <Menu
+          align="end"
+          label={item.about}
+          trigger={
+            <Button
+              size="sm"
+              variant="ghost"
+              iconOnly
+              icon="more"
+              loading={canceling}
+              aria-label={`${t("taskManager.sections.returns")}: ${item.about}`}
+              title={t("taskManager.sections.returns")}
+            />
+          }
+        >
+          <MenuItem icon="message" onSelect={onOpen}>
+            {t("taskManager.actions.open")}
+          </MenuItem>
+          {item.canCancel && (
+            <MenuItem icon="close" danger onSelect={onCancel}>
+              {t("followUps.cancel")}
+            </MenuItem>
+          )}
+        </Menu>
+      </span>
+    </li>
+  );
+}
+
+/** A return that won't come, among what ended today: who canceled it (nobody: its time found it couldn't). */
+function CanceledReturnRow({
+  item,
+  agentName,
+  meId,
+  onOpen,
+}: {
+  item: CanceledReturn;
+  agentName: string;
+  meId: string;
+  onOpen: () => void;
+}) {
+  const { t, i18n } = useTranslation();
+  const word = returnCanceledText(t, item, meId, agentName);
+  const sub = [agentName, returnPlace(t, item)].filter(Boolean).join(" · ");
+  const at = returnClock(t, i18n.language, item.at, Date.parse(item.canceledAt));
+  return (
+    <li className="tm-row tm-row--ended">
+      <span className="tm-cell tm-cell--name">
+        <OpensAgent agentId={item.agentId}>
+          <AgentAvatar agentId={item.agentId} name={agentName} size="xs" />
+        </OpensAgent>
+        <RowName title={item.about} sub={sub} tip={[sub, `${word} · ${at}`]} onClick={onOpen} />
+      </span>
+      <span className="tm-cell tm-cell--state">
+        <Chip icon="clock">{word}</Chip>
+        <span className="tm-mark" aria-hidden="true">
+          <Icon name="clock" size={14} />
+        </span>
+      </span>
+      <span className="tm-cell tm-cell--time ac-num">{at}</span>
     </li>
   );
 }

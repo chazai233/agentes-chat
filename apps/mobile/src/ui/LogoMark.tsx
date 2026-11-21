@@ -7,9 +7,10 @@ const INSET = 56 / 512;
 
 /**
  * This fork's mark (a workspace without a logo of its own wears it): the white agent on its warm tile, the same
- * picture as the launch image and the app icon.
+ * picture as the launch image and the app icon. `sky` (a workspace's own colors, which upstream's mark paints) is taken
+ * and left aside: the mark is a picture.
  */
-export function LogoMark({ size }: { size: number }) {
+export function LogoMark({ size }: { size: number; sky?: unknown }) {
   const side = size * SCALE;
   return (
     <View

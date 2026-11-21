@@ -32,13 +32,6 @@ export function isPrivate(path: string): boolean {
 /** Public files that hold the patterns on purpose: this check, its samples and the ignore rule for local prototypes. */
 const NAMES_PRIVATE_PATHS = new Set(["scripts/check-boundaries.ts", "scripts/check-boundaries.test.ts", ".gitignore"]);
 
-/**
- * The phone app's preview pages, built from third-party libraries (pdf.js, docx-preview, SheetJS, JSZip): minified
- * code, not our prose, where names like these turn up by chance. Their sources here (scripts/pdfjs, scripts/preview)
- * are still checked.
- */
-const BUNDLED_PAGES = new Set(["apps/mobile/assets/pdfjs/viewer.html", "apps/mobile/assets/preview/viewer.html"]);
-
 /** Third-party skills kept as published (MIT; see each folder's VENDORED.md): not our prose either. */
 const VENDORED_DIRS = [".claude/skills/huashu-design/"];
 
@@ -129,8 +122,7 @@ if (import.meta.main) {
   // Tracked files and new ones not ignored, so a file is checked before its first commit too.
   const notes: string[] = [];
   for (const path of lsFiles("--cached", "--others", "--exclude-standard")) {
-    if (isPrivate(path) || NAMES_PRIVATE_PATHS.has(path) || BUNDLED_PAGES.has(path) || VENDORED_DIRS.some((d) => path.startsWith(d)))
-      continue;
+    if (isPrivate(path) || NAMES_PRIVATE_PATHS.has(path) || VENDORED_DIRS.some((d) => path.startsWith(d))) continue;
     const file = Bun.file(path);
     if (!(await file.exists())) continue; // deleted, not staged yet
     const text = await file.text();

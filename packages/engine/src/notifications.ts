@@ -21,6 +21,7 @@ import { decidableBySql } from "./approvals";
 import { NotFoundError, ValidationError } from "./errors";
 import { publishUserEvent } from "./events";
 import { cutText } from "./format";
+import { queueLiveActivity } from "./live-activity-queue";
 import type { PreviewMeta } from "./message-preview";
 import { noticeOn, noticePrefsOf, readNoticePrefs } from "./notice-prefs";
 import { listMemberships, requirePermission } from "./organizations";
@@ -269,6 +270,20 @@ export const NOTIFICATION_KINDS = [
    */
   "device.tool_request",
   /**
+   * Someone needs a coding CLI installed on this person's computer (`POST …/machines/{id}/cli-install/ask`): as
+   * `device.tool_request`, one row per computer and program (`device-cli:<machineId>:<tool>`), the program in
+   * `latest.reason`. The row installs it in one click; done once the computer has it.
+   */
+  "device.cli_request",
+  /**
+   * An agent waits for a folder on this person's computer (`request_folder_access`): its owner, waiting, one row per
+   * request (`device-folder:<requestId>`), the agent as actor, the computer in `source.machineId` with its name in
+   * `source.label`, the folder in `latest.title` and the agent's reason in `latest.text`. The person answers it on the
+   * computer itself (folders are never granted from the server), so the row has no button; done once the machine
+   * reports the decision (`access.decided`).
+   */
+  "device.folder_request",
+  /**
    * "Pedir a um admin" (`POST …/admin-asks`, `admin-asks.ts`): to whoever may do it, the asker as actor, what in
    * `latest.reason` (`channel_agent`, `create_agents`, `webhook` with the service in `latest.title`). `channel_agent`
    * names `source.channelId` (its name in `label`) and `agentId`, waits, and is done once the agent is added.
@@ -338,6 +353,8 @@ export interface NotificationSource {
   phoneId?: string;
   /** `device.in_use`, `device.waiting`, `device.access_request`: the agent's run on the device. */
   runId?: string;
+  /** A message in a live file's conversation (ADR 0199): the file, which the apps open with it at `messageId`. */
+  artifactId?: string;
   /** Channel name, thread title, issue title, topic title, mission or routine name, widget or board title. */
   label?: string;
 }
@@ -384,6 +401,8 @@ export interface NotificationLatest {
   names?: string[];
   /** `join_request` from a member's suggestion (ADR 0090): who suggested, so a row of one says so. */
   suggestedBy?: string;
+  /** `join_request` for an outside collaborator (ADR 0191): who they work for, so a row of one says so. */
+  outsideOf?: string;
   /** `composio_limit`: the calls a month allows. */
   calls?: number;
   /** `computer_disk_full`: the share of the disk in use (0 to 1) and the GB left. */
@@ -1246,6 +1265,8 @@ export async function notificationCountsByOrg(
 }
 
 async function publishCounts(deps: NotificationDeps, orgId: string, userId: string) {
+  // What waits on them moved (a request made, answered, dismissed, snoozed): their phone's Live Activity too (ADR 0210).
+  await queueLiveActivity(deps.db, userId).catch(() => {});
   if (!deps.pubsub) return;
   const c = await countsOf(deps.db, orgId, userId, nowOf(deps)).catch(() => null);
   if (c)
@@ -1299,8 +1320,13 @@ export async function markNotificationRead(
   const row = await mine(deps, userId, orgId, id);
   const updated = await change(deps, row, { readAt: read ? (row.readAt ?? nowOf(deps)) : null });
   const view = notificationView(updated);
+  // The person's own change (an undo too) is not news: no island, sound or banner.
   if (!updated.doneAt) {
-    await publishUserEvent(deps.pubsub, orgId, userId, { type: "notification.upserted", notification: view });
+    await publishUserEvent(deps.pubsub, orgId, userId, {
+      type: "notification.upserted",
+      notification: view,
+      alert: false,
+    });
   }
   await publishCounts(deps, orgId, userId);
   return view;
@@ -1331,7 +1357,8 @@ export async function markNotificationDone(
     userId,
     updated.doneAt
       ? { type: "notification.removed", id: row.id }
-      : { type: "notification.upserted", notification: view },
+      : // Back by the person's hand ("Mover de volta", an undo): not news, so no island, sound or banner.
+        { type: "notification.upserted", notification: view, alert: false },
   );
   await publishCounts(deps, orgId, userId);
   return view;
@@ -1352,8 +1379,13 @@ export async function snoozeNotification(
     const row = await mine(deps, userId, orgId, id);
     const updated = await change(deps, row, { snoozedUntil: null });
     const view = notificationView(updated);
+    // Undone by the person: not news, so no island, sound or banner.
     if (!updated.doneAt) {
-      await publishUserEvent(deps.pubsub, orgId, userId, { type: "notification.upserted", notification: view });
+      await publishUserEvent(deps.pubsub, orgId, userId, {
+        type: "notification.upserted",
+        notification: view,
+        alert: false,
+      });
     }
     await publishCounts(deps, orgId, userId);
     return view;
@@ -1388,6 +1420,30 @@ export async function markAllNotificationsRead(
     .set({ readAt: now })
     .where(and(visible(orgId, userId, now), filterSql(filter), isNull(notifications.readAt)))
     .returning({ id: notifications.id });
+  if (rows.length > 0) await publishCounts(deps, orgId, userId);
+  return { ids: rows.map((r) => r.id) };
+}
+
+/**
+ * "Concluir todas" (in a filter): each row goes to "Concluídas" as with "Concluir". What waits on the person (an
+ * approval, a question) stays until it is answered. The ids changed, for the undo (`markNotificationDone(…, false)`).
+ */
+export async function markAllNotificationsDone(
+  deps: NotificationDeps,
+  userId: string,
+  orgId: string,
+  filter: NotificationFilter = "all",
+): Promise<{ ids: string[] }> {
+  await requirePermission(deps.db, userId, orgId, "read");
+  if (!NOTIFICATION_FILTERS.includes(filter)) throw new ValidationError("Unknown filter");
+  if (filter === "done" || filter === "waiting") return { ids: [] };
+  const now = nowOf(deps);
+  const rows = await deps.db
+    .update(notifications)
+    .set({ doneAt: now, doneByUser: true })
+    .where(and(visible(orgId, userId, now), filterSql(filter), eq(notifications.waiting, false)))
+    .returning({ id: notifications.id });
+  for (const r of rows) await publishUserEvent(deps.pubsub, orgId, userId, { type: "notification.removed", id: r.id });
   if (rows.length > 0) await publishCounts(deps, orgId, userId);
   return { ids: rows.map((r) => r.id) };
 }

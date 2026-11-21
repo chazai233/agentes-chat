@@ -1,4 +1,4 @@
-import { pairAddress } from "@agenteschat/adapters";
+import { pairAddress, TASK_LIMIT_BOUNDS } from "@agenteschat/adapters";
 import {
   approveDeviceJoin,
   cancelWifiPairing,
@@ -8,11 +8,14 @@ import {
   deleteMachine,
   denyDeviceJoin,
   forgetPhone,
+  IPHONE_REPAIR_LIMIT,
   listDevices,
   lookForPhones,
   normalizeUserCode,
   openConnectLink,
+  openXcode,
   pickIphoneOverWifi,
+  repairIphone,
   startWifiPairing,
   stopPhone,
   updateComputerDevice,
@@ -30,6 +33,7 @@ import {
   installScript,
   installScriptPowerShell,
 } from "../../runner/install-script";
+import { migrateScript, migrateScriptPowerShell } from "../../runner/migrate-script";
 import { requestLimitIp } from "../http/client-ip";
 import { apiError, errorResponse } from "../http/errors";
 import {
@@ -75,7 +79,14 @@ const Status = z
     z.object({ kind: z.literal("needs_you"), reason: Reason }),
     z.object({ kind: z.literal("preparing"), reason: Reason }),
     z.object({ kind: z.literal("paused"), until: z.string().nullable() }),
-    z.object({ kind: z.literal("offline"), lastSeenAt: z.string().nullable(), withHost: z.boolean().optional() }),
+    z.object({
+      kind: z.literal("offline"),
+      lastSeenAt: z.string().nullable(),
+      withHost: z.boolean().optional(),
+      cause: z.enum(["unresponsive", "stopped", "dropped"]).optional().openapi({
+        description: "A computer someone brought: why it went offline (`Machine.offlineCause`). Absent: unknown.",
+      }),
+    }),
     z.object({ kind: z.literal("unsupported"), reason: Reason }),
   ])
   .openapi("DeviceStatus");
@@ -120,6 +131,9 @@ const Computer = z
     status: Status,
     maxTasks: z.number().int().nullable(),
     toolchains: z.record(z.string(), z.string()),
+    opensXcode: z.boolean().openapi({
+      description: "A Mac whose agentes.chat opens Xcode and looks at its iPhone again for the iPhone guide.",
+    }),
     lastSeenAt: z.string().nullable(),
     mayUse: z.boolean(),
     mayManage: z.boolean(),
@@ -225,6 +239,8 @@ const LINK_LIMIT = { limit: 20, windowMs: 10 * 60_000 };
 const PAIR_LIMIT = { limit: 30, windowMs: 10 * 60_000 };
 /** Xcode fixes per person: each may open a password window on someone's Mac. */
 const XCODE_FIX_LIMIT = { limit: 10, windowMs: 10 * 60_000 };
+/** Xcode opened on a Mac per person: each puts a window on someone's screen. */
+const XCODE_OPEN_LIMIT = { limit: 10, windowMs: 10 * 60_000 };
 /** Installer fetches per address (`/i/{code}`): a person retrying, not someone guessing codes. */
 const SCRIPT_LIMIT = { limit: 30, windowMs: 60_000 };
 
@@ -268,9 +284,10 @@ export function deviceAppRoutes(deps: AppDeps) {
       path: "/organizations/{orgId}/devices/computers/{machineId}",
       tags,
       security,
-      summary: "Rename a computer, change who can use it, mark it the workspace's, let replies spill over to it",
+      summary:
+        "Rename a computer, change who can use it, mark it the workspace's, let replies spill over to it, set its tasks at once",
       description:
-        "Its owner: anything. An admin: rename, mark it the workspace's, and narrow who can use someone's own computer (`device.widen_forbidden` otherwise). Never the workspace's computer (`machine.managed`). Only its owner turns spill-over on (`device.spill_owner_only`).",
+        "Its owner: anything. An admin: rename, mark it the workspace's, and narrow who can use someone's own computer (`device.widen_forbidden` otherwise). Never the workspace's computer (`machine.managed`). Only its owner turns spill-over on (`device.spill_owner_only`) and changes its tasks at once (`device.tasks_owner_only`; an admin too on a computer nobody connected), which the computer applies: it must be online (`machine.offline`) with an app that can (`machine.outdated`).",
       request: {
         params: MachineParams,
         body: body(
@@ -279,6 +296,7 @@ export function deviceAppRoutes(deps: AppDeps) {
             audience: Audience.optional(),
             belongsToWorkspace: z.boolean().optional(),
             spill: z.object({ own: z.boolean().optional(), others: z.boolean().optional() }).optional(),
+            maxTasks: z.number().int().min(TASK_LIMIT_BOUNDS[0]).max(TASK_LIMIT_BOUNDS[1]).optional(),
           }),
         ),
       },
@@ -287,7 +305,7 @@ export function deviceAppRoutes(deps: AppDeps) {
     async (c) => {
       const { orgId, machineId } = c.req.valid("param");
       const device = await updateComputerDevice(
-        { db, pubsub },
+        { db, pubsub, hub: deps.extras?.sandbox?.machines?.hub },
         c.get("user").id,
         orgId,
         machineId,
@@ -502,6 +520,56 @@ export function deviceAppRoutes(deps: AppDeps) {
 
   app.openapi(
     createRoute({
+      method: "post",
+      path: "/organizations/{orgId}/devices/computers/{machineId}/xcode-open",
+      tags,
+      security,
+      summary: "Open Xcode on this Mac (its owner or an admin)",
+      description:
+        "Xcode, open with an iPhone plugged in, shows the Developer Mode switch in the iPhone's Settings when it is hidden. `opened: false`: the Mac's agentes.chat is too old for it, or Xcode didn't open.",
+      request: { params: MachineParams },
+      responses: {
+        200: json(z.object({ opened: z.boolean() }).openapi("XcodeOpened")),
+        429: errorResponse("Too many tries"),
+        ...errors,
+      },
+    }),
+    async (c) => {
+      const { orgId, machineId } = c.req.valid("param");
+      const userId = c.get("user").id;
+      const limit = await deps.adapters.rateLimiter.consume(`xcode-open:user:${userId}`, XCODE_OPEN_LIMIT);
+      if (!limit.allowed) return apiError(c, 429, "rate_limited", "Too many tries. Try again in a few minutes.");
+      return c.json(await openXcode({ db, hub: hub() }, userId, orgId, machineId), 200);
+    },
+  );
+
+  app.openapi(
+    createRoute({
+      method: "post",
+      path: "/organizations/{orgId}/devices/phones/{phoneId}/repair",
+      tags,
+      security,
+      summary: "Repair a real iPhone's test helper (its Mac's owner or an admin)",
+      description:
+        "The Mac stops the iPhone's test helper and whatever is left of it, builds it again with the Xcode installed there now and checks it on the iPhone, in a few minutes; the phone's state shows it. What runs on the phone stops. `update`: the Mac's agentes.chat is too old for it.",
+      request: { params: PhoneParams, body: body(z.object({}).strict()) },
+      responses: {
+        200: json(z.object({ repairing: z.boolean(), update: z.literal(true).optional() }).openapi("IphoneRepair")),
+        429: errorResponse("Too many repairs"),
+        ...errors,
+      },
+    }),
+    async (c) => {
+      const { orgId, phoneId } = c.req.valid("param");
+      const userId = c.get("user").id;
+      const limit = await deps.adapters.rateLimiter.consume(`iphone-repair:user:${userId}`, IPHONE_REPAIR_LIMIT);
+      if (!limit.allowed) return apiError(c, 429, "rate_limited", "Too many tries. Try again in a few minutes.");
+      return c.json(await repairIphone({ db, hub: hub() }, userId, orgId, phoneId), 200);
+    },
+  );
+
+  app.openapi(
+    createRoute({
       method: "get",
       path: "/organizations/{orgId}/devices/computers/{machineId}/wifi-iphones",
       tags,
@@ -707,4 +775,8 @@ export function registerConnectScripts(app: OpenAPIHono, deps: AppDeps) {
   };
   app.get("/i/:code", serve(false));
   app.get("/i/:code/ps", serve(true));
+  // `agentes-runner migrate`, run once without installing or connecting anything (ADR 0055, addendum 2026-11-16):
+  // the same for everyone, so no code and nothing of the caller's in it.
+  app.get("/migrate.sh", (c) => c.body(migrateScript(config.PUBLIC_URL), 200, SH));
+  app.get("/migrate.ps1", (c) => c.body(migrateScriptPowerShell(config.PUBLIC_URL), 200, PS));
 }

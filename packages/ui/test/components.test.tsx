@@ -39,6 +39,7 @@ import {
   type StepTrackStep,
   Textarea,
 } from "../src";
+import { TIP_HOLD_MS } from "../src/components/Tip";
 
 const body = () => within(document.body);
 
@@ -60,6 +61,29 @@ describe("Button", () => {
     const remove = getByRole("button", { name: /^Remover/ }) as HTMLButtonElement;
     expect(remove.className).toBe("ac-link ac-link--action ac-link--danger");
     expect(remove.disabled).toBe(true);
+  });
+
+  test("its words are one label a narrow place can cut, its icon and keys beside it; an element child stays as written", () => {
+    render(
+      <>
+        <div>
+          <Button icon="message">Falar com o Assistente de Atendimento</Button>
+        </div>
+        <div>
+          <Button kbd={["⌘", "↵"]}>Enviar {2} itens</Button>
+        </div>
+        <div>
+          <Button>
+            <b>Negrito</b>
+          </Button>
+        </div>
+      </>,
+    );
+    const talk = body().getByRole("button", { name: "Falar com o Assistente de Atendimento" });
+    expect([...talk.children].map((c) => c.getAttribute("class"))).toEqual(["ac-icon", "ac-btn__label"]);
+    const send = body().getByRole("button", { name: /^Enviar 2 itens/ });
+    expect(send.querySelector(":scope > .ac-btn__label")?.textContent).toBe("Enviar 2 itens");
+    expect(body().getByRole("button", { name: "Negrito" }).querySelector(".ac-btn__label")).toBeNull();
   });
 
   test("variants map to the design classes; default type is button", () => {
@@ -110,6 +134,19 @@ describe("Button", () => {
     );
     const link = body().getByRole("link", { name: "Entrar" });
     expect(link.className).toContain("ac-btn--primary");
+  });
+
+  test("asChild and disabled: the link takes no click and no Tab stop, as a button that is off", () => {
+    render(
+      <Button asChild disabled>
+        <a href="/x">Entrar</a>
+      </Button>,
+    );
+    const link = body().getByRole("link", { name: "Entrar" });
+    expect(link.getAttribute("aria-disabled")).toBe("true");
+    expect(link.tabIndex).toBe(-1);
+    // False: the click's own effect (following the link) was called off.
+    expect(fireEvent.click(link)).toBe(false);
   });
 });
 
@@ -255,8 +292,10 @@ describe("ApprovalCard", () => {
     );
     const cards = container.querySelectorAll(".ac-approval--done");
     expect(cards).toHaveLength(2);
-    expect(cards[0]?.querySelector(".ac-chip")?.className).toBe("ac-chip ac-chip--done");
-    expect(cards[1]?.querySelector(".ac-chip")?.className).toBe("ac-chip");
+    // The chip ends the head's line, or starts its own under who asked (`.ac-tail`).
+    expect(cards[0]?.querySelector(".ac-chip")?.className).toBe("ac-chip ac-chip--done ac-tail");
+    expect(cards[1]?.querySelector(".ac-chip")?.className).toBe("ac-chip ac-tail");
+    expect(cards[0]?.querySelector(".ac-approval__head")?.classList.contains("ac-tailrow")).toBe(true);
     expect(container.querySelector(".ac-approval__actions")).toBeNull();
   });
 });
@@ -711,11 +750,13 @@ describe("Menu", () => {
     const menu = body().getByRole("menu");
     const box = within(menu).getByRole("menuitemcheckbox");
     expect(box.getAttribute("aria-checked")).toBe("false");
+    // A box that stays open is a multi-pick: the kit's checkbox at its end, ticked or not.
     expect([...box.children].map((c) => c.getAttribute("class"))).toEqual([
       "ac-menu__label",
       "ac-menu__hint",
-      "ac-menu__check",
+      "ac-check ac-menu__box",
     ]);
+    expect(box.querySelector(".ac-menu__box")?.getAttribute("data-state")).toBe("unchecked");
     const radios = within(menu).getAllByRole("menuitemradio");
     expect(radios.map((r) => r.getAttribute("aria-checked"))).toEqual(["true", "false"]);
     expect(radios.map((r) => [...r.children].map((c) => c.getAttribute("class")))).toEqual([
@@ -741,8 +782,9 @@ describe("Menu", () => {
     expect([...box.children].map((c) => c.getAttribute("class")?.split(" ")[0])).toEqual([
       "ac-icon",
       "ac-menu__label",
-      "ac-menu__check",
+      "ac-check",
     ]);
+    expect(box.querySelector(".ac-menu__box")?.getAttribute("data-state")).toBe("checked");
   });
 
   test("quick reactions end with a cell that opens every emoji", async () => {
@@ -1042,8 +1084,11 @@ describe("Diff", () => {
       ["ac-diff__block ac-diff__block--add", "Adicionado: novo"],
     ]);
     const css = await Bun.file(new URL("../src/styles/components.css", import.meta.url).pathname).text();
-    expect(css).toContain("box-shadow: inset 3px 0 0 var(--ok);");
-    expect(css).toContain("box-shadow: inset 3px 0 0 var(--danger);");
+    // The tint alone says which: no bar on a block's edge.
+    const rule = (name: string) => css.slice(css.indexOf(`.ac-diff__block--${name} {`)).split("}")[0] ?? "";
+    expect(rule("add")).toContain("var(--ok) 12%");
+    expect(rule("del")).toContain("var(--danger) 10%");
+    expect(rule("add") + rule("del")).not.toContain("box-shadow");
   });
 
   test("renders lines with screen-reader labels", async () => {
@@ -1227,6 +1272,28 @@ describe("Message aside and foot", () => {
     expect(value(".ac-receipt__check .ac-icon", "width")).toBe("16px");
   });
 
+  test("a grouped row's time in its gutter is the short clock, on one line in every gutter", async () => {
+    const { container } = render(
+      <Message author="João" time="11:43 PM" gutterTime="11:43" grouped aside={<span>✓✓</span>}>
+        <MessageText>de novo</MessageText>
+      </Message>,
+    );
+    expect(container.querySelector(".ac-msg__gutter-time")?.textContent).toBe("11:43");
+    // The hidden header, read by screen readers, keeps the whole time.
+    expect(container.querySelector(".ac-msg__body > .ac-visually-hidden")?.textContent).toContain("11:43 PM");
+    const css = (await Bun.file(new URL("../src/styles/components.css", import.meta.url).pathname).text()).replace(
+      /\/\*[\s\S]*?\*\//g,
+      "",
+    );
+    // A time allowed to wrap in a face-wide gutter broke where the browser found a break ("13:" over "32").
+    const gutterTimes = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, s = ""]) => s.includes("gutter-time"));
+    expect(
+      gutterTimes.some(([, s = "", b = ""]) => s.trim() === ".ac-msg__gutter-time" && /white-space:\s*nowrap/.test(b)),
+    ).toBe(true);
+    for (const [, , body = ""] of gutterTimes)
+      expect(body).not.toMatch(/white-space:(?!\s*nowrap)|min-content|word-break/);
+  });
+
   test("an aside or a foot with nothing in it takes no room, in a stacked body too", async () => {
     const Nothing = () => null;
     const { container } = render(
@@ -1261,35 +1328,153 @@ describe("Message on touch", () => {
       else delete (navigator as { maxTouchPoints?: number }).maxTouchPoints;
     };
   };
-  const row = (onReply: () => void) => (
+  const row = (onReply: () => void, onClick?: (what: string) => void) => (
     <Message
       author="João"
       time="10:43"
       grouped
       menu={{ label: "Ações da mensagem de João", items: <MenuItem onSelect={onReply}>Responder</MenuItem> }}
+      onClick={() => onClick?.("row")}
     >
       <MessageText>Os rótulos ficam com o verde antigo?</MessageText>
+      <a
+        href="https://example.com/briefing"
+        onClick={(e) => {
+          e.preventDefault();
+          onClick?.("link");
+        }}
+      >
+        example.com/briefing
+      </a>
+      {/* biome-ignore lint/a11y/useMediaCaption: a test video with no words */}
+      <video src="https://example.com/demo.mp4" width={160} height={90} onClick={() => onClick?.("video")} />
       <button type="button">Conectar</button>
     </Message>
   );
+  const finger = (at = { clientX: 20, clientY: 20 }) => ({ pointerType: "touch", pointerId: 1, ...at });
+  const tapOn = (el: Element) =>
+    act(async () => {
+      fireEvent.pointerDown(el, finger());
+      fireEvent.pointerUp(el, finger());
+      fireEvent.click(el, finger());
+    });
+  /** A finger held on `el` until the menu's time, then lifted (a phone's click follows the lift). */
+  const hold = (el: Element, at?: { clientX: number; clientY: number }) =>
+    act(async () => {
+      fireEvent.pointerDown(el, finger(at));
+      await Bun.sleep(TIP_HOLD_MS + 50);
+      fireEvent.pointerUp(el, finger(at));
+      fireEvent.click(el, finger(at));
+    });
+  const words = (container: HTMLElement) => container.querySelector(".ac-msg__text") as HTMLElement;
 
-  test("a tap on the row opens its actions in a menu off the row and lights the row; a control keeps its own tap", async () => {
+  test("a tap does its own thing (words, a link, a video, a control) and opens no menu", async () => {
+    const restore = device(true);
+    try {
+      const did: string[] = [];
+      const { container } = render(
+        row(
+          () => {},
+          (what) => did.push(what),
+        ),
+      );
+      const targets = [
+        words(container),
+        container.querySelector("a") as HTMLElement,
+        container.querySelector("video") as HTMLElement,
+        body().getByRole("button", { name: "Conectar" }),
+      ];
+      for (const el of targets) {
+        await tapOn(el);
+        // After each tap: the next tap would close a menu this one opened.
+        expect(body().queryByRole("menu")).toBeNull();
+      }
+      expect(did).toEqual(["row", "link", "row", "video", "row", "row"]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a long press opens its actions in a menu off the row and lights the row; the lift acts on nothing", async () => {
     const restore = device(true);
     try {
       let replied = 0;
-      const { container } = render(row(() => replied++));
+      const did: string[] = [];
+      const { container } = render(
+        row(
+          () => replied++,
+          (what) => did.push(what),
+        ),
+      );
       const article = container.querySelector("article") as HTMLElement;
-      await act(async () => fireEvent.click(body().getByRole("button", { name: "Conectar" })));
-      expect(body().queryByRole("menu")).toBeNull();
-      await act(async () => fireEvent.click(container.querySelector(".ac-msg__text") as HTMLElement));
+      await hold(words(container));
       const menu = body().getByRole("menu", { name: "Ações da mensagem de João" });
       expect(article.getAttribute("data-menu-open")).toBe("true");
+      expect(did).toEqual([]);
       // On the page, not in the row: a list's containment would make a fixed anchor the row's.
       expect(article.contains(menu)).toBe(false);
       await act(async () => fireEvent.click(within(menu).getByRole("menuitem", { name: "Responder" })));
       expect(replied).toBe(1);
       expect(body().queryByRole("menu")).toBeNull();
       expect(article.hasAttribute("data-menu-open")).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a long press on a link, a video or a control keeps the browser's own; a finger that moves is a scroll", async () => {
+    const restore = device(true);
+    try {
+      const { container } = render(row(() => {}));
+      await hold(container.querySelector("a") as HTMLElement);
+      await hold(container.querySelector("video") as HTMLElement);
+      await hold(body().getByRole("button", { name: "Conectar" }));
+      await act(async () => {
+        fireEvent.pointerDown(words(container), finger());
+        fireEvent.pointerMove(words(container), finger({ clientX: 20, clientY: 60 }));
+        await Bun.sleep(TIP_HOLD_MS + 50);
+      });
+      expect(body().queryByRole("menu")).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  test("Android's long press (`contextmenu` while the finger is down) opens ours at once, not the page's", async () => {
+    const restore = device(true);
+    try {
+      const { container } = render(row(() => {}));
+      let pageMenu = true;
+      await act(async () => {
+        fireEvent.pointerDown(words(container), finger());
+        pageMenu = fireEvent.contextMenu(words(container), finger());
+      });
+      expect(pageMenu).toBe(false);
+      expect(body().getByRole("menu", { name: "Ações da mensagem de João" })).toBeTruthy();
+    } finally {
+      restore();
+    }
+  });
+
+  test("a long press whose `contextmenu` the page answered opens only the page's menu", async () => {
+    const restore = device(true);
+    try {
+      const { container } = render(
+        <Message
+          author="João"
+          time="10:43"
+          menu={{ label: "Ações da mensagem de João", items: <MenuItem>Responder</MenuItem> }}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <MessageText>Os rótulos ficam com o verde antigo?</MessageText>
+        </Message>,
+      );
+      await act(async () => {
+        fireEvent.pointerDown(words(container), finger());
+        fireEvent.contextMenu(words(container), finger());
+        await Bun.sleep(TIP_HOLD_MS + 50);
+      });
+      expect(body().queryByRole("menu")).toBeNull();
     } finally {
       restore();
     }
@@ -1320,10 +1505,7 @@ describe("Message on touch", () => {
     const { container } = render(row(() => {}));
     const article = container.querySelector("article") as HTMLElement;
     const screen = layout(article);
-    const tap = () =>
-      act(async () =>
-        fireEvent.click(container.querySelector(".ac-msg__text") as HTMLElement, { clientX: 120, clientY: 400 }),
-      );
+    const tap = () => hold(words(container), { clientX: 120, clientY: 400 });
     try {
       // A long reply at the end of a phone's list: 140px over it, so the menu opens over it and scrolls.
       screen.place(667, 140, 600);
@@ -1349,7 +1531,7 @@ describe("Message on touch", () => {
     const frames = () => act(() => new Promise((done) => setTimeout(done, 60)));
     try {
       screen.place(500, 300, 340);
-      await act(async () => fireEvent.click(container.querySelector(".ac-msg__text") as HTMLElement));
+      await hold(words(container));
       expect(screen.anchor()).toEqual(["0px", "300px", "390px", "40px"]);
       screen.place(844, 560, 600);
       await act(async () => window.dispatchEvent(new Event("resize")));
@@ -1375,11 +1557,19 @@ describe("Message on touch", () => {
     }
   });
 
-  test("with a mouse a click opens nothing: the row's bar has the actions", async () => {
+  test("with a mouse a click or a held button opens nothing: the row's bar and the right click have the actions", async () => {
     const restore = device(false);
     try {
       const { container } = render(row(() => {}));
-      await act(async () => fireEvent.click(container.querySelector(".ac-msg__text") as HTMLElement));
+      const mouse = { pointerType: "mouse", pointerId: 2 };
+      await act(async () => {
+        fireEvent.pointerDown(words(container), mouse);
+        await Bun.sleep(TIP_HOLD_MS + 50);
+        fireEvent.pointerUp(words(container), mouse);
+        fireEvent.click(words(container), mouse);
+      });
+      // The right click is the page's own (`onContextMenu`): the row leaves it alone.
+      expect(fireEvent.contextMenu(words(container), mouse)).toBe(true);
       expect(body().queryByRole("menu")).toBeNull();
       expect(container.querySelector("article")?.hasAttribute("data-menu-open")).toBe(false);
     } finally {

@@ -1,8 +1,9 @@
-import { type ApiClient, type ArtifactDetail, keys, useApi } from "@agenteschat/client";
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { type ApiClient, type ArtifactDetail, isLiveFileKind, keys, useApi } from "@agenteschat/client";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Directory, File, Paths } from "expo-file-system";
 import * as MediaLibrary from "expo-media-library";
 import * as Sharing from "expo-sharing";
+import { useId } from "react";
 import { Platform } from "react-native";
 import { appHeaders, readCookie } from "@/lib/auth";
 import { serverUrl } from "@/lib/server";
@@ -16,6 +17,8 @@ import { resolveDownloadUrl, type ShareSource, safeFileName, shareSource } from 
 
 /** The server's links live 5 minutes; refetch a bit before. */
 const LINK_STALE_MS = 4 * 60 * 1000;
+/** A view that keeps its link may start from the shared one while that one has most of its life ahead. */
+const LINK_SEED_MS = 60 * 1000;
 
 export interface RemoteFile {
   uri: string;
@@ -23,6 +26,9 @@ export interface RemoteFile {
   /** Served by our own server (with the session), not a link signed by a storage bucket. */
   ours?: boolean;
 }
+
+const linkKey = (orgId: string, id: string | null, version?: number) =>
+  ["org", orgId, "artifacts", "link", id ?? "", version ?? "latest"] as const;
 
 async function remote(api: ApiClient, orgId: string, id: string, version?: number): Promise<RemoteFile> {
   const { url } = await api.artifacts.download(orgId, id, version);
@@ -46,16 +52,59 @@ async function download(r: RemoteFile, file: File): Promise<void> {
   await file.write(bytes);
 }
 
-/** The link to show a picture or a PDF (refreshed before it expires). */
-export function useRemoteFile(orgId: string, id: string | null, version?: number) {
+/**
+ * Files this phone just sent, by id: the photo or video it sent is drawn from the phone's own copy, so a message never
+ * fades its picture out and back in when the server's copy takes the place of the one on its way (`LocalFiles`). Kept
+ * while the app stays open.
+ */
+const localCopies = new Map<string, string>();
+export const rememberLocalCopy = (id: string, uri: string) => localCopies.set(id, uri);
+
+/**
+ * Pictures already drawn once in this run, by their cache key: one coming back (its row mounted again as the list
+ * scrolls, the conversation opened again) shows at once from the cache, where a fade each time read as a flicker.
+ */
+const drawn = new Set<string>();
+/** A picture's fade in, its first time only (`drawn`). */
+export const pictureFade = (key: string) => (drawn.has(key) ? 0 : 160);
+/** Its `onLoad`: drawn once, it never fades in again in this run. */
+export const pictureDrawn = (key: string) => {
+  drawn.add(key);
+};
+
+/**
+ * The link to show a file; a file this phone just sent, from its own copy. Shared and refreshed before it expires, for
+ * a picture (its cache entry is `id@version`, whatever the link). `once`: read when the view opens and kept while it
+ * stays, for what a new link would start over (a video back at 0:00, a PDF at its first page): a link of the view's
+ * own that nothing reads again (no refetch on focus or reconnect, and `static` so no invalidation does either), only
+ * its `refetch` ("Try again"); gone with the view, so the next one starts from a fresh link.
+ */
+export function useRemoteFile(orgId: string, id: string | null, version?: number, options?: { once?: boolean }) {
   const api = useApi();
-  return useQuery({
-    queryKey: ["org", orgId, "artifacts", "link", id ?? "", version ?? "latest"] as const,
+  const qc = useQueryClient();
+  const view = useId();
+  const local = id ? localCopies.get(id) : undefined;
+  const once = options?.once === true;
+  const shared = linkKey(orgId, id, version);
+  const query = useQuery<RemoteFile>({
+    queryKey: once ? [...shared, "once", view] : shared,
     queryFn: () => remote(api, orgId, id ?? "", version),
-    enabled: Boolean(id),
-    staleTime: LINK_STALE_MS,
-    gcTime: LINK_STALE_MS,
+    enabled: Boolean(id) && !local,
+    ...(once
+      ? {
+          staleTime: "static" as const,
+          gcTime: 0,
+          refetchOnWindowFocus: false,
+          refetchOnReconnect: false,
+          // The shared link, when it was read moments ago: the view starts at once, with most of the link's life left.
+          initialData: () => {
+            const state = qc.getQueryState<RemoteFile>(shared);
+            return state?.data && Date.now() - state.dataUpdatedAt < LINK_SEED_MS ? state.data : undefined;
+          },
+        }
+      : { staleTime: LINK_STALE_MS, gcTime: LINK_STALE_MS }),
   });
+  return local ? ({ ...query, data: { uri: local, headers: {} }, isError: false } as typeof query) : query;
 }
 
 /** Several artifacts at once (a message's files), sharing the cache of `useArtifact`. */
@@ -78,44 +127,6 @@ export async function fileText(api: ApiClient, orgId: string, a: ArtifactDetail)
   const res = await fetch(r.uri, { headers: r.headers, credentials: "omit" });
   if (!res.ok) throw new Error(`download ${res.status}`);
   return res.text();
-}
-
-/**
- * A file's bytes as base64, for the app's preview pages (PDF, Office, tables, ZIP): a page in a web view takes the
- * bytes by message, so it never needs the session or the network. Downloaded into the cache once per version.
- */
-export function useFileBytes(orgId: string, a: ArtifactDetail | null, enabled: boolean) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["org", orgId, "artifacts", "bytes", a?.id ?? "", a?.shownVersion ?? 0] as const,
-    queryFn: async () => {
-      const art = a as ArtifactDetail;
-      const dir = new Directory(Paths.cache, "preview", `${art.id}-${art.shownVersion}`);
-      dir.create({ intermediates: true, idempotent: true });
-      const file = new File(dir, "file");
-      if (!file.exists) {
-        const r = await remote(api, orgId, art.id, art.shownVersion);
-        try {
-          await download(r, file);
-        } catch (err) {
-          // A half-written copy would be read as the file next time.
-          if (file.exists) file.delete();
-          throw err;
-        }
-      }
-      const data = await file.base64();
-      // An empty copy is never kept: the next open downloads again.
-      if (!data) {
-        file.delete();
-        throw new Error("empty download");
-      }
-      return data;
-    },
-    enabled: enabled && a !== null,
-    staleTime: Number.POSITIVE_INFINITY,
-    // The text is large; dropped soon after the viewer closes (the file stays in the cache).
-    gcTime: 30_000,
-  });
 }
 
 /** A fresh folder per file under the cache, so the copy keeps its real name. */
@@ -142,12 +153,30 @@ export async function localCopy(
   const r =
     source.from === "export"
       ? {
-          uri: api.artifacts.fileUrl(orgId, a.id, { version: a.shownVersion, format: source.format }),
+          // A live file is exported as it stands now (ADR 0198): its versions are snapshots, not what people see.
+          uri: api.artifacts.fileUrl(orgId, a.id, {
+            ...(isLiveFileKind(a.kind) ? {} : { version: a.shownVersion }),
+            ...(source.format ? { format: source.format } : {}),
+          }),
           headers: appHeaders(await readCookie()),
         }
       : await remote(api, orgId, a.id, a.shownVersion);
   await download(r, file);
   return { uri: file.uri, source };
+}
+
+/**
+ * A PDF's copy in the cache for the system's renderer, which reads a file, never a link (`PdfPages`): one per version,
+ * kept while the cache keeps it, so the PDF opens again without downloading it.
+ */
+export async function pdfCopy(api: ApiClient, orgId: string, a: ArtifactDetail): Promise<string> {
+  const dir = new Directory(Paths.cache, "pdf");
+  dir.create({ intermediates: true, idempotent: true });
+  const file = new File(dir, `${safeFileName(a.id)}-${a.shownVersion}.pdf`);
+  if (file.exists && (file.size ?? 0) > 0) return file.uri;
+  const r = await remote(api, orgId, a.id, a.shownVersion);
+  const done = await File.downloadFileAsync(r.uri, file, { headers: r.headers, idempotent: true });
+  return done.uri;
 }
 
 /** The system share sheet with the real file (Salvar imagem, Salvar em Arquivos, other apps). */
@@ -159,77 +188,6 @@ export async function shareFile(api: ApiClient, orgId: string, a: ArtifactDetail
     uri,
     Platform.OS === "android" && source.mime ? { mimeType: source.mime, dialogTitle: source.name } : {},
   );
-}
-
-/** Where "Download" saves on Android: the folder the person picked once (the system's own picker), kept here. */
-const downloadFolderFile = () => new File(Paths.document, "download-folder.txt");
-
-function savedDownloadFolder(): Directory | null {
-  try {
-    const f = downloadFolderFile();
-    const uri = f.exists ? f.textSync().trim() : "";
-    return uri ? new Directory(uri) : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Download: a copy of the file on the phone. Android asks once for the folder (the system's picker, Downloads
- * suggested; the app keeps access to it) and saves there from then on, again asking only when that folder is gone;
- * iPhones save through the share sheet's "Save to Files". Resolves with the folder's name, or null when the person
- * closed the picker or the sheet.
- */
-export async function saveToDevice(api: ApiClient, orgId: string, a: ArtifactDetail): Promise<string | null> {
-  const { uri, source } = await localCopy(api, orgId, a);
-  if (Platform.OS !== "android") {
-    await Sharing.shareAsync(uri);
-    return null;
-  }
-  const bytes = await new File(uri).bytes();
-  const into = async (dir: Directory) => {
-    // A name already there gets the system's " (1)".
-    const target = dir.createFile(source.name, source.mime || null);
-    await target.write(bytes);
-    return dir.name;
-  };
-  const saved = savedDownloadFolder();
-  if (saved) {
-    try {
-      return await into(saved);
-    } catch {
-      // The folder was removed or its access taken back: ask again.
-    }
-  }
-  let picked: Directory;
-  try {
-    picked = await Directory.pickDirectoryAsync(DOWNLOADS_HINT);
-  } catch {
-    return null;
-  }
-  const name = await into(picked);
-  try {
-    downloadFolderFile().writeSync(picked.uri);
-  } catch {
-    // Not remembered: the picker asks again next time.
-  }
-  return name;
-}
-
-/** The picker opens on the phone's Downloads (a hint: the system may start elsewhere). */
-const DOWNLOADS_HINT = "content://com.android.externalstorage.documents/document/primary%3ADownload";
-
-/**
- * Opens the file in another app on the phone (Android's "Open with", iOS's Quick Look). False when nothing on the
- * phone opens its type.
- */
-export async function openWithApp(api: ApiClient, orgId: string, a: ArtifactDetail): Promise<boolean> {
-  const { uri, source } = await localCopy(api, orgId, a);
-  const file = new File(uri);
-  const options = source.mime ? { mimeType: source.mime } : {};
-  if (!(await File.canPreview(file, options))) return false;
-  await File.preview(file, { ...options, title: source.name });
-  return true;
 }
 
 /** Salvar em Fotos: add-only access (never reads the library). False when the person said no. */

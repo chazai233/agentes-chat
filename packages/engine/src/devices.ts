@@ -1,4 +1,5 @@
 import {
+  IPHONE_DEV_MODE_PROTOCOL,
   IPHONE_WIFI_PROTOCOL,
   PHONE_SCREEN_PROTOCOL,
   type PhoneHolder,
@@ -10,8 +11,9 @@ import {
   type RunnerPhone,
   STREAM_CLOSE,
   STREAM_LIMITS,
+  TASK_LIMIT_PROTOCOL,
 } from "@agenteschat/adapters";
-import { and, type Database, type Executor, eq, gt, inArray, isNull, schema, sql } from "@agenteschat/db";
+import { and, type Database, type Executor, eq, gt, inArray, isNull, lt, schema, sql } from "@agenteschat/db";
 import { AUDIENCE_MODES, type AudienceMode } from "./audience";
 import { recordAudit } from "./audit";
 import { ForbiddenError, NotFoundError, ValidationError } from "./errors";
@@ -24,7 +26,11 @@ import {
   type MachineRow,
   machineOnline,
   machinePause,
+  type OfflineCause,
+  offlineCause,
   publishMachineUpdated,
+  shownOnline,
+  withTaskLimit,
 } from "./machines";
 import { can, getMembership, type Membership, requirePermission } from "./organizations";
 import { closedRefusal, OrgDeletingError, orgStanding } from "./standing";
@@ -66,8 +72,8 @@ export type DeviceStatus =
   | { kind: "needs_you"; reason: PhoneReason | string }
   | { kind: "preparing"; reason: PhoneReason | string }
   | { kind: "paused"; until: string | null }
-  /** `withHost`: a phone whose host is offline. */
-  | { kind: "offline"; lastSeenAt: string | null; withHost?: boolean }
+  /** `withHost`: a phone whose host is offline. `cause`: a computer's, as `offlineCause` reads it. */
+  | { kind: "offline"; lastSeenAt: string | null; withHost?: boolean; cause?: OfflineCause }
   | { kind: "unsupported"; reason: PhoneReason | string };
 
 export interface PhoneDevice {
@@ -109,9 +115,11 @@ export interface ComputerDevice {
   systemMode: boolean;
   audience: DeviceAudience;
   status: DeviceStatus;
-  /** Background tasks it runs at once. */
+  /** Background tasks it runs at once, as its runner says (`TASK_LIMIT_PROTOCOL`); null: an older one, which runs 3. */
   maxTasks: number | null;
   toolchains: Record<string, string>;
+  /** A Mac whose app opens Xcode and looks at its iPhone again for the iPhone guide (`IPHONE_DEV_MODE_PROTOCOL`). */
+  opensXcode: boolean;
   lastSeenAt: string | null;
   mayUse: boolean;
   mayManage: boolean;
@@ -262,7 +270,7 @@ export interface DevicesList {
   requests: JoinRequest[];
 }
 
-/** Background tasks a computer runs at once; its runner doesn't report its own limit, so the runner's default. */
+/** Background tasks a computer runs at once when its runner doesn't say (before `TASK_LIMIT_PROTOCOL`): its default. */
 export const DEFAULT_MAX_TASKS = 3;
 
 /** `devices.changed` to every member: a phone, a holder or a join request changed; the apps read `GET …/devices` again. */
@@ -289,14 +297,18 @@ export const phoneTargetOf = (
 ): PhoneTarget => ({ platform: row.platform, serial: runnerSerial(row), holder });
 
 /** A device only its owner may widen (admins only narrow it): one person's computer, not the workspace's. */
-const personalComputer = (m: Pick<MachineRow, "kind" | "pairedByUserId" | "executors" | "belongsToWorkspace">) =>
+export const personalComputer = (m: Pick<MachineRow, "kind" | "pairedByUserId" | "executors" | "belongsToWorkspace">) =>
   m.kind === "connected" && m.pairedByUserId !== null && m.executors?.mode !== "system" && !m.belongsToWorkspace;
 
 function computerStatus(m: MachineRow, running: number, now: Date): DeviceStatus {
-  if (!machineOnline(m, now)) return { kind: "offline", lastSeenAt: iso(m.lastSeenAt) };
+  // Asleep in standby and waking as it should, it reads ready (ADR 0161).
+  if (!shownOnline(m, now)) {
+    const cause = offlineCause(m, false);
+    return { kind: "offline", lastSeenAt: iso(m.lastSeenAt), ...(cause ? { cause } : {}) };
+  }
   const pause = machinePause(m, now);
   if (pause) return { kind: "paused", until: pause.until };
-  if (running > 0) return { kind: "busy", running, max: DEFAULT_MAX_TASKS };
+  if (running > 0) return { kind: "busy", running, max: m.size?.maxTasks ?? DEFAULT_MAX_TASKS };
   return { kind: "ready" };
 }
 
@@ -432,8 +444,9 @@ export async function listDevices(
       systemMode: m.executors?.mode === "system",
       audience: rule.audience,
       status: computerStatus(m, busy.get(m.id) ?? 0, now),
-      maxTasks: null,
+      maxTasks: m.size?.maxTasks ?? null,
       toolchains: m.executors?.toolchains ?? {},
+      opensXcode: !managed && m.os === "darwin" && m.protocol >= IPHONE_DEV_MODE_PROTOCOL,
       lastSeenAt: iso(m.lastSeenAt),
       mayUse,
       mayManage: !managed && mayManageDevice(membership, viewerUserId, m.pairedByUserId),
@@ -541,15 +554,18 @@ export interface ComputerDeviceInput {
   audience?: DeviceAudience;
   belongsToWorkspace?: boolean;
   spill?: { own?: boolean; others?: boolean };
+  /** Background tasks at once (`TASK_LIMIT_BOUNDS`): the computer applies it, so it must be online. */
+  maxTasks?: number;
 }
 
 /**
  * `PATCH …/devices/computers/{machineId}`: its owner changes anything; an admin renames it, marks it the workspace's,
  * and narrows its rule (widens it only on the workspace's own devices). Never the workspace's computer. Spill-over is
  * its owner's to turn on (other people's agents would think on their plan's computer); an admin only turns it off.
+ * How many tasks it runs at once is its owner's too (their computer's memory), an admin's only on one nobody connected.
  */
 export async function updateComputerDevice(
-  deps: { db: Database; pubsub?: PubSub },
+  deps: { db: Database; pubsub?: PubSub; hub?: Pick<MachineCaller, "call" | "status"> },
   actorId: string,
   orgId: string,
   machineId: string,
@@ -585,6 +601,37 @@ export async function updateComputerDevice(
     if (on === undefined) continue;
     if (on && !owner) throw new ForbiddenError("Only the device's owner can turn this on", "device.spill_owner_only");
     set[column] = on;
+  }
+  if (input.maxTasks !== undefined) {
+    if (!owner && machine.pairedByUserId !== null) {
+      throw new ForbiddenError(
+        "Only the person who connected this computer can change how many tasks it runs at once",
+        "device.tasks_owner_only",
+      );
+    }
+    if (machine.protocol < TASK_LIMIT_PROTOCOL) {
+      throw new ValidationError(
+        "This computer's app is too old to change this from here. Update it.",
+        "machine.outdated",
+      );
+    }
+    if (!deps.hub || !(await deps.hub.status(machine.id))?.online) {
+      throw new MachineOfflineError(machine.name, machine.kind);
+    }
+    const { maxTasks } = await deps.hub.call(machine.id, { op: "limits.set", maxTasks: input.maxTasks });
+    // Its `runner.state` says the same soon after; the answer below reads the new one already.
+    await deps.db
+      .update(machines)
+      .set({ size: withTaskLimit(maxTasks), updatedAt: new Date() })
+      .where(eq(machines.id, machine.id));
+    await recordAudit(deps.db, {
+      orgId,
+      actor: { type: "person", id: actorId },
+      action: "device.updated",
+      target: { type: "machine", id: machine.id },
+      details: { maxTasks },
+    });
+    await publishDevicesChanged(deps.pubsub, orgId);
   }
   if (Object.keys(set).length > 0) {
     await deps.db
@@ -914,11 +961,13 @@ export async function syncMachinePhones(
       ownerUserId: machine.pairedByUserId,
       followsHost: p.platform === "ios",
       lastSeenAt: now,
+      stateSince: now,
       updatedAt: now,
     });
   }
   if (seen.size > 0) {
     const fresh = sql`(${machinePhones.deletedAt} is not null or ${machinePhones.ownerUserId} is distinct from excluded.owner_user_id)`;
+    const same = sql`(${machinePhones.state} = excluded.state and ${machinePhones.reason} is not distinct from excluded.reason)`;
     // ponytail: two people's computers both reporting one phone (a cable on one, adb over Wi-Fi on the other) pass it
     // back and forth, each time as a new phone; a phone that is two places at once would need a host per phone.
     await db
@@ -938,6 +987,8 @@ export async function syncMachinePhones(
           followsHost: sql`excluded.follows_host`,
           lastSeenAt: sql`excluded.last_seen_at`,
           updatedAt: sql`excluded.updated_at`,
+          stateSince: sql`case when ${same} then ${machinePhones.stateSince} else excluded.state_since end`,
+          stuckReportedAt: sql`case when ${same} then ${machinePhones.stuckReportedAt} else null end`,
           name: sql`case when ${fresh} then excluded.name else ${machinePhones.name} end`,
           audienceMode: sql`case when ${fresh} then 'owner' else ${machinePhones.audienceMode} end`,
           audienceUserIds: sql`case when ${fresh} then '{}'::text[] else ${machinePhones.audienceUserIds} end`,
@@ -962,7 +1013,7 @@ export async function syncMachinePhones(
   if (gone.length === 0) return current;
   await db
     .update(machinePhones)
-    .set({ state: "offline", reason: null, holder: null, updatedAt: now })
+    .set({ state: "offline", reason: null, holder: null, stateSince: now, stuckReportedAt: null, updatedAt: now })
     .where(
       inArray(
         machinePhones.id,
@@ -971,8 +1022,41 @@ export async function syncMachinePhones(
     );
   const off = new Set(gone.map((p) => p.id));
   return current.map((p) =>
-    off.has(p.id) ? { ...p, state: "offline", reason: null, holder: null, updatedAt: now } : p,
+    off.has(p.id)
+      ? { ...p, state: "offline", reason: null, holder: null, stateSince: now, stuckReportedAt: null, updatedAt: now }
+      : p,
   );
+}
+
+/** A phone's setup that sits on one step, the same reason, this long is reported (`claimStuckPhoneSetups`). */
+export const PHONE_SETUP_STUCK_MS = 10 * 60_000;
+
+/**
+ * Phones whose setup sits on one step (`needs_you` or `preparing`, its reason unchanged) for `PHONE_SETUP_STUCK_MS`,
+ * each marked reported by the same statement: a sweep on another replica never reports it again, and neither does
+ * this one until its state or reason moves (`syncMachinePhones` clears the mark).
+ */
+export async function claimStuckPhoneSetups(db: Executor, now = new Date()) {
+  return db
+    .update(machinePhones)
+    .set({ stuckReportedAt: now })
+    .where(
+      and(
+        isNull(machinePhones.deletedAt),
+        isNull(machinePhones.stuckReportedAt),
+        inArray(machinePhones.state, ["needs_you", "preparing"]),
+        lt(machinePhones.stateSince, new Date(now.getTime() - PHONE_SETUP_STUCK_MS)),
+      ),
+    )
+    .returning({
+      orgId: machinePhones.orgId,
+      machineId: machinePhones.machineId,
+      platform: machinePhones.platform,
+      state: machinePhones.state,
+      reason: machinePhones.reason,
+      osVersion: machinePhones.osVersion,
+      stateSince: machinePhones.stateSince,
+    });
 }
 
 /**

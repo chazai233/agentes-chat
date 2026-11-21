@@ -2,6 +2,7 @@ import type {
   Agent,
   AgentGroup,
   AgentSort,
+  ApiClient,
   Availability,
   Channel,
   ChannelCategory,
@@ -18,6 +19,7 @@ import {
   useAgentStatuses,
   useAiAccounts,
   useArchivedChannels,
+  useAuthConfig,
   useChannelCategories,
   useChannels,
   useConnections,
@@ -39,7 +41,16 @@ import {
 } from "@agenteschat/client";
 import { agentSections, groupOf } from "@agenteschat/client/lib/agent-groups";
 import { WORK_TICK_MS, workLine } from "@agenteschat/client/lib/agent-work";
-import { audienceChip, audienceNames, audienceNotice, canTalk, hiddenAgentIds } from "@agenteschat/client/lib/audience";
+import {
+  audienceChip,
+  audienceNames,
+  audienceNotice,
+  canTalk,
+  hiddenAgentIds,
+  listsAllAgents,
+  managesAgent,
+  opensDm,
+} from "@agenteschat/client/lib/audience";
 import { workspaceNotes } from "@agenteschat/client/lib/deletion";
 import { ErrorBoundary } from "@agenteschat/client/lib/error-boundary";
 import { errorText } from "@agenteschat/client/lib/errors";
@@ -84,6 +95,7 @@ import {
   MenuSeparator,
   MenuSub,
   modKey,
+  OPEN_LAYER,
   PixelSpinner,
   Popover,
   PresenceBadge,
@@ -93,8 +105,9 @@ import {
   SkeletonGroup,
   selectionSkyUrl,
 } from "@agenteschat/ui";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import type { TFunction } from "i18next";
 import {
   type CSSProperties,
   type DragEvent,
@@ -110,25 +123,27 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { useApi } from "@/api/context";
-import { useAuth } from "@/auth/context";
 import { useDirectory } from "@/hooks/useDirectory";
 import { agentLine, availabilityOf, personLine, useAgentPresence, usePersonPresence } from "@/hooks/usePresence";
 import { useServerPlace } from "@/hooks/useServerPlace";
 import { useSidebarPins } from "@/hooks/useSidebarPins";
+import { useSignOut } from "@/hooks/useSignOut";
 import { useUnreadTitle } from "@/hooks/useUnreadTitle";
 import { useWorkspaceGroups } from "@/hooks/useWorkspaceGroups";
+import { switchAccount } from "@/lib/accounts";
 import { requestAgentPanel } from "@/lib/agent-panel-ask";
 import { requestChannelDetails } from "@/lib/channel-details";
 import type { MenuEntry } from "@/lib/context-menu";
 import { onPhoneAsk, takePhoneAsk, thisMac } from "@/lib/desktop";
 import { entityMenu } from "@/lib/entity-menu";
+import { navigateAway } from "@/lib/navigate";
 import { useOpenParam } from "@/lib/open-param";
 import { markOpen } from "@/lib/perf";
 import { ownPlanLines, planNearLimit, planWord } from "@/lib/plan-usage";
 import { useScrollEdges } from "@/lib/scroll-edges";
 import { rightHandSeen, STORAGE_KEYS, sessionStore, storage, storedStrings } from "@/lib/storage";
 import { useToast } from "@/lib/toast";
-import { offersNewWorkspace } from "@/lib/workspaces";
+import { offersNewWorkspace, type WorkspaceGroup } from "@/lib/workspaces";
 import type { SettingsSection } from "@/pages/settings-sections";
 import { useStreams } from "@/realtime/context";
 import { EmailDialog, ProfileDialog } from "./AccountSettings";
@@ -144,6 +159,7 @@ import {
   useMoveAgent,
 } from "./AgentGroups";
 import { AgentWorkLine } from "./AgentWorkLine";
+import { AgoraButton } from "./Agora";
 import { ArchivedChannelsDialog } from "./ArchivedChannelsDialog";
 import { ChangeAvatarDialog } from "./AvatarBuilder";
 import { FeedbackMark } from "./arrival/FeedbackDialog";
@@ -197,28 +213,61 @@ function UnshownRow() {
 }
 export const unshownRow = () => <UnshownRow />;
 
-/** Tablet widths: the sidebar is always an icon rail (NavDrawer.tsx has the other breakpoints). */
+/** Tablet widths: the sidebar starts as an icon rail (NavDrawer.tsx has the other breakpoints). */
 export const TABLET_QUERY = "(min-width: 761px) and (max-width: 1199px)";
 
 /**
- * The sidebar shrunk to its icon rail at desktop widths (remembered), shared with the Mac app's title bar,
- * which carries the toggle there (DesktopTitleBar.tsx). In memory too, for when storage is blocked.
+ * The sidebar shrunk to its icon rail, shared with the Mac app's title bar, which carries the toggle there
+ * (DesktopTitleBar.tsx). Desktop widths remember the person's choice (in memory too, for when storage is blocked).
+ * Tablet widths start as the rail every time: their toggle opens the whole sidebar over the page until a link, Esc,
+ * a click outside or the toggle closes it, since the page's tablet layout has no room for it beside.
  */
 const SIDEBAR_EVENT = "agentes:sidebar";
 let sidebarCollapsed = storage.get(STORAGE_KEYS.sidebarCollapsed) === "1";
-const onSidebarChange = (cb: () => void) => {
+let tabletOpen = false;
+/**
+ * A page that runs out of room asked for the rail (a live file with its conversation beside it, ADR 0199): shown as
+ * the rail on desktop widths, never stored, so the person's own choice comes back when the page lets go.
+ */
+let roomAsked = false;
+/** How many times the person used the toggle (any page): a page that asked for the room stops at their hand. */
+let handToggles = 0;
+export const onSidebarChange = (cb: () => void) => {
   window.addEventListener(SIDEBAR_EVENT, cb);
   return () => window.removeEventListener(SIDEBAR_EVENT, cb);
 };
+const isTablet = () => typeof window.matchMedia === "function" && window.matchMedia(TABLET_QUERY).matches;
 export const toggleSidebar = () => {
-  sidebarCollapsed = !sidebarCollapsed;
-  storage.set(STORAGE_KEYS.sidebarCollapsed, sidebarCollapsed ? "1" : "0");
+  handToggles += 1;
+  if (isTablet()) tabletOpen = !tabletOpen;
+  // Shrunk for a page's room: the toggle gives the person their sidebar back (their stored choice, open).
+  else if (roomAsked) roomAsked = false;
+  else {
+    sidebarCollapsed = !sidebarCollapsed;
+    storage.set(STORAGE_KEYS.sidebarCollapsed, sidebarCollapsed ? "1" : "0");
+  }
   window.dispatchEvent(new Event(SIDEBAR_EVENT));
 };
+/** A page asks for the sidebar's room (its rail) or lets it go; the person's stored choice is untouched. */
+export const askSidebarRoom = (asked: boolean) => {
+  if (roomAsked === asked) return;
+  roomAsked = asked;
+  window.dispatchEvent(new Event(SIDEBAR_EVENT));
+};
+/** The toggle's count so far: a page compares it to tell the person's hand from its own ask. */
+export const sidebarHandToggles = () => handToggles;
+/** A tablet's open sidebar back to its rail. */
+export const closeTabletSidebar = () => {
+  if (!tabletOpen) return;
+  tabletOpen = false;
+  window.dispatchEvent(new Event(SIDEBAR_EVENT));
+};
+/** Whether the sidebar is its icon rail at this width (a phone's drawer never reads it), and its toggle. */
 export function useSidebarCollapsed(): [boolean, () => void] {
+  const tablet = useMediaQuery(TABLET_QUERY);
   const collapsed = useSyncExternalStore(
     onSidebarChange,
-    () => sidebarCollapsed,
+    () => (tablet ? !tabletOpen : sidebarCollapsed || roomAsked),
     () => false,
   );
   return [collapsed, toggleSidebar];
@@ -404,17 +453,21 @@ export function Sidebar() {
   const working = dir.agents.filter((a) => busy.has(a.id)).length;
   // Narrow screens: the sidebar is a drawer (id, open state, close on link / swipe).
   const drawer = useNavDrawer();
-  // Desktop: the person can shrink the sidebar to an icon rail (remembered). Tablets always get the rail.
+  // Desktop: the person can shrink the sidebar to an icon rail (remembered). Tablets start as the rail and open over
+  // the page (`float`).
   const compact = useMediaQuery(COMPACT_QUERY);
   const tablet = useMediaQuery(TABLET_QUERY);
   const [collapsed, toggleCollapsed] = useSidebarCollapsed();
-  const rail = !compact && (tablet || collapsed);
+  const rail = !compact && collapsed;
+  const float = tablet && !collapsed;
 
   // AGENTES (ADR 0083 and its addendum): the agents that talk to me (who manages agents may list the rest), the ones in
-  // no group, then each group of agents, each with my pinned ones on top and the rest in my order.
+  // no group, then each group of agents, each with my pinned ones on top and the rest in my order. A row opens its DM,
+  // so "the rest" are the agents whose DM opens for me (`opensDm`): the ones I manage, never someone's private agent
+  // the key doesn't reach (ADR 0085 addendum of 2026-11-17), which Team still lists.
   const manages = can(org, "manage_agents");
   const team = dir.agents.filter((a) => !isRightHand(a));
-  const shownAgents = team.filter((a) => (manages && view.showAllAgents) || canTalk(a));
+  const shownAgents = team.filter((a) => canTalk(a) || (manages && view.showAllAgents && opensDm(a)));
   const groups = useAgentGroups(orgId).data ?? [];
   const byGroup = agentSections(shownAgents, groups, (a) => a.id);
   const ordered = (items: Agent[]) => {
@@ -472,6 +525,9 @@ export function Sidebar() {
   const agentRow = (a: Agent) => {
     const dm = dmOf.get(a.id);
     const unread = dm?.unread ?? 0;
+    // Groups are made by who holds "Edit agents"; an agent moves in or out of one only for who manages it (ADR 0085
+    // addendum of 2026-11-17): the key alone doesn't reach someone's private agent.
+    const arranges = managesAgent(a);
     return (
       <ErrorBoundary
         key={a.id}
@@ -491,8 +547,8 @@ export function Sidebar() {
           pinned={pins.agents.includes(a.id)}
           onPrefetch={() => dm && prefetch(dm.channelId)}
           onOpen={() => markOpen(dm?.channelId ?? a.id)}
-          drag={organize ? drag.row(a.id) : undefined}
-          menuExtra={manages ? groupEntries(a) : undefined}
+          drag={organize && arranges ? drag.row(a.id) : undefined}
+          menuExtra={arranges ? groupEntries(a) : undefined}
         />
       </ErrorBoundary>
     );
@@ -503,6 +559,39 @@ export function Sidebar() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   // The list fades out at an edge only while there is more to scroll past it (no hard cut); re-checked as lists load.
   useScrollEdges(navRef, [channels.data, directs.length, shownAgents.length, groups.length, rail]);
+
+  // A tablet's open sidebar folds back on a new page, a width change, Esc (before the page sees it: Esc in a channel
+  // would stop an agent; an open menu closes first), a press outside it and focus leaving it (Tab past its end would
+  // land on the page under it).
+  const sideRef = useRef<HTMLElement>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new page or width closes it
+  useEffect(() => closeTabletSidebar(), [pathname, tablet]);
+  useEffect(() => {
+    if (!float) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented || document.querySelector(OPEN_LAYER)) return;
+      e.preventDefault();
+      // Focus on a row the rail hides would be lost: back to the toggle (the title bar's, in the Mac app).
+      if (sideRef.current?.contains(document.activeElement)) {
+        document.querySelector<HTMLElement>("[data-sidebar-toggle]")?.focus();
+      }
+      closeTabletSidebar();
+    };
+    // Not the title bar's toggle: its click closes it after the press.
+    const onOutside = (e: Event) => {
+      const t = e.target;
+      if (!(t instanceof Element) || sideRef.current?.contains(t) || t.closest("[data-sidebar-toggle]")) return;
+      if (!document.querySelector(OPEN_LAYER)) closeTabletSidebar();
+    };
+    window.addEventListener("keydown", onKey, true);
+    document.addEventListener("pointerdown", onOutside, true);
+    document.addEventListener("focusin", onOutside, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("pointerdown", onOutside, true);
+      document.removeEventListener("focusin", onOutside, true);
+    };
+  }, [float]);
 
   // The open conversation stays in sight: once per navigation (as soon as its row exists), a row
   // hidden past the list's edge is brought to the middle. Later scrolling is the person's.
@@ -758,7 +847,7 @@ export function Sidebar() {
             </SidebarSection>
           );
         })}
-        {team.length > shownAgents.length && (
+        {listsAllAgents(org) && team.length > shownAgents.length && (
           <Link to="/org/$orgId/team" params={{ orgId }} className="sidebar__item sidebar__see-all">
             <Icon name="agent" />
             <span className="sidebar__item-label">
@@ -853,8 +942,19 @@ export function Sidebar() {
       )}
     </Link>
   );
-  // The collapse shows at desktop widths only: tablets always have the rail, a phone the drawer.
-  const collapseLabel = collapsed ? t("shell.expandNav") : t("shell.collapseNav");
+  // The sidebar's toggle, in one place at every width: beside ⌘K (beside the bell in a personal workspace), under them
+  // in the rail. In a phone's drawer it closes the drawer.
+  const collapseLabel = compact ? t("shell.closeNav") : collapsed ? t("shell.expandNav") : t("shell.collapseNav");
+  const collapseProps = {
+    variant: "ghost",
+    iconOnly: true,
+    icon: "sidebar",
+    "data-sidebar-toggle": "",
+    "aria-label": collapseLabel,
+    title: collapseLabel,
+    "aria-expanded": compact || !collapsed,
+    onClick: compact ? () => drawer?.close({ restoreFocus: true }) : toggleCollapsed,
+  } as const;
   // The workspace header's line. Each count with its own plural: one summary string followed the people's, so
   // "1 agentes".
   const summary = overview.data
@@ -869,6 +969,8 @@ export function Sidebar() {
       className="sidebar"
       aria-label={t("shell.nav")}
       data-rail={rail}
+      data-float={float || undefined}
+      ref={sideRef}
       // Its faces' sizes follow the mode (the agents' and New agent's, ADR 0164).
       data-personal={personal || undefined}
       {...drawer?.navProps}
@@ -877,23 +979,13 @@ export function Sidebar() {
         <WorkspaceSky part="side" rail={rail} />
         {personal ? (
           // A personal workspace (ADR 0159): the person on top (their account, settings and workspaces in one menu),
-          // the bell and the collapse beside them. The desktop app's title bar has its own collapse (desktop.css).
+          // Agora, the bell and the collapse beside them. The desktop app's title bar has its own Agora and collapse
+          // (desktop.css).
           <div className="sidebar__org sidebar__org--person">
             <AccountMenu personal />
+            <AgoraButton below={compact} className="sidebar__agora" />
             {bell}
-            {!compact && !tablet && (
-              <Button
-                variant="ghost"
-                size="sm"
-                iconOnly
-                icon="sidebar"
-                className="sidebar__head-collapse"
-                aria-label={collapseLabel}
-                title={collapseLabel}
-                aria-expanded={!collapsed}
-                onClick={toggleCollapsed}
-              />
-            )}
+            <Button {...collapseProps} size="sm" className="sidebar__head-collapse" />
           </div>
         ) : (
           <>
@@ -908,18 +1000,8 @@ export function Sidebar() {
                 <Kbd>{modKey()}</Kbd>
                 <Kbd>K</Kbd>
               </button>
-              {!compact && !tablet && (
-                <Button
-                  variant="ghost"
-                  iconOnly
-                  icon="sidebar"
-                  className="sidebar__collapse"
-                  aria-label={collapseLabel}
-                  title={collapseLabel}
-                  aria-expanded={!collapsed}
-                  onClick={toggleCollapsed}
-                />
-              )}
+              <AgoraButton below={compact} className="sidebar__agora" />
+              <Button {...collapseProps} className="sidebar__collapse" />
             </div>
           </>
         )}
@@ -1794,20 +1876,19 @@ function AgentRow({
   const channelList = useChannels(org.id).data;
   const here = workingIn ? channelList?.find((c) => c.id === workingIn)?.name : undefined;
   const channelName = (id: string) => channelList?.find((c) => c.id === id)?.name;
-  // Under its name: for whom or where it works, what it waits on, and for how long.
-  const doing = workLine(
-    t,
-    i18n.language,
-    work,
-    { agentName: (id) => dir.agentById.get(id)?.name, channelName },
-    clock,
-  );
+  const out = shown?.presence === "out" && line ? line.text : null;
+  // Under its name: for whom or where it works, what it waits on, and for how long; a return it set comes after why it
+  // is out.
+  const doing =
+    work?.state === "later" && out
+      ? null
+      : workLine(t, i18n.language, work, { agentName: (id) => dir.agentById.get(id)?.name, channelName }, clock);
   const navigate = useNavigate();
   const agentEntries = useAgentMenu();
   const rowMenu = entityMenu(() => agentEntries(a, menuExtra));
-  // Its owner and the admins: its settings on hover, like a channel's.
-  const edits = can(org, "manage_agents") || a.ownerUserId === me.user.id;
-  // Listed for who manages agents though it doesn't talk to them: the line says who it talks to.
+  // Its owner and who manages it (ADR 0085 addendum of 2026-11-17): its settings on hover, like a channel's.
+  const edits = managesAgent(a) || a.ownerUserId === me.user.id;
+  // Listed for who manages it though it doesn't talk to them (its DM opens, `opensDm`): the line says who it talks to.
   const locked = !canTalk(a);
   const names = locked ? audienceNames(a, (id) => dir.memberById.get(id)?.name, dir.roleName) : [];
   // Working: the pixel orbit in its color beside its name (what it is on in its label and the row's title), so the
@@ -1822,9 +1903,8 @@ function AgentRow({
     : working
       ? line?.text
       : undefined;
-  // Under the name, one line of one height: its work (waiting on me, working, a wait, in line), why it is out, who it
-  // talks to when that is limited, else its role (the agent's fixed label) as a tag.
-  const out = shown?.presence === "out" && line ? line.text : null;
+  // Under the name, one line of one height: its work (waiting on me, working, a wait, in line), why it is out, a return
+  // it set, who it talks to when that is limited, else its role (the agent's fixed label) as a tag.
   const under =
     out ??
     (locked
@@ -1834,8 +1914,11 @@ function AgentRow({
           ? t("sidebarAgents.talksOnly", { name: names[0] })
           : chip
       : a.role);
-  // Its title: who it is over what it does, whole ("Ajudando a Ada · #vendas · 22 min").
-  const place = work?.forAgentId && work.channelId ? (work.channelName ?? channelName(work.channelId)) : undefined;
+  // Its title: who it is over what it does, whole ("Ajudando a Ada · #vendas · 22 min", "Retorno às 00:32 · #vendas").
+  const place =
+    (work?.forAgentId || work?.state === "later") && work.channelId
+      ? (work.channelName ?? channelName(work.channelId))
+      : undefined;
   const doingTitle = doing
     ? [upperFirst(doing.text, i18n.language), place && `#${place}`, doing.time].filter(Boolean).join(" · ")
     : null;
@@ -2068,12 +2151,24 @@ function UnreadCount({
  * opening down, also holds what the workspace menu held for one person: Your account, Settings and the person's
  * workspaces. Mounted once either way: the dialogs live here.
  */
+/** Mints the person's link to the referral service and leaves for it (ADR 0192), as `useOpenBilling` does. */
+function useOpenReferrals() {
+  const { t } = useTranslation();
+  const api = useApi();
+  const toast = useToast();
+  const here = useRouterState({ select: (s) => s.location.pathname });
+  return useMutation({
+    mutationFn: () => api.account.referralsLink(here),
+    onSuccess: ({ url }) => navigateAway(url),
+    onError: () => toast.show(t("referrals.failed"), "error"),
+    meta: { silent: true },
+  });
+}
+
 function AccountMenu({ personal = false }: { personal?: boolean }) {
   const { t, i18n } = useTranslation();
   const { org, me } = useOrg();
   const dir = useDirectory(org.id);
-  const auth = useAuth();
-  const qc = useQueryClient();
   const navigate = useNavigate();
   const compact = useMediaQuery(COMPACT_QUERY);
   const saveStatus = useSaveStatus();
@@ -2109,12 +2204,9 @@ function AccountMenu({ personal = false }: { personal?: boolean }) {
   const who = [me.user.name, line?.text ?? presenceWord].filter(Boolean).join(" · ");
   const under = Boolean(line || presenceWord);
 
-  const signOut = async () => {
-    await auth.signOut();
-    storage.set(STORAGE_KEYS.signedOut, "1");
-    qc.clear();
-    await navigate({ to: "/login" });
-  };
+  const { signOut } = useSignOut();
+  const referrals = useAuthConfig().data?.referralsUrl;
+  const openReferrals = useOpenReferrals();
   const openSettings = (section?: SettingsSection) =>
     void (section
       ? navigate({ to: "/org/$orgId/settings/$section", params: { orgId: org.id, section } })
@@ -2235,6 +2327,11 @@ function AccountMenu({ personal = false }: { personal?: boolean }) {
         <MenuItem icon="settings" onSelect={() => openSettings(personal ? undefined : "account")}>
           {t("shell.settings")}
         </MenuItem>
+        {referrals && (
+          <MenuItem icon="coin" disabled={openReferrals.isPending} onSelect={() => openReferrals.mutate()}>
+            {t("referrals.open")}
+          </MenuItem>
+        )}
         {import.meta.env.DEV && (
           <MenuItem icon="grid" onSelect={() => void navigate({ to: "/dev/gallery" })}>
             {t("shell.gallery")}
@@ -2275,7 +2372,11 @@ function useWorkspaceLook() {
     return o !== undefined && isPersonal(o) && o.role === "owner";
   };
   const several = me.organizations.filter((o) => mine(o.id)).length > 1;
-  return (o: { id: string; name: string; logo?: string | null }, face: "sm" | "md", mark: number) =>
+  return (
+    o: { id: string; name: string; logo?: string | null; accent?: string | null },
+    face: "sm" | "md",
+    mark: number,
+  ) =>
     mine(o.id)
       ? {
           leading: <Avatar kind="person" name={me.user.name} imageUrl={me.user.image} size={face} />,
@@ -2283,7 +2384,13 @@ function useWorkspaceLook() {
           sub: null,
           personal: true,
         }
-      : { leading: <OrgMark logo={o.logo} size={mark} />, name: o.name, sub: null, personal: false };
+      : {
+          // Each workspace in its own accent: the engine's `sky` is the active one's.
+          leading: <OrgMark logo={o.logo} accent={o.accent ?? null} size={mark} />,
+          name: o.name,
+          sub: null,
+          personal: false,
+        };
 }
 
 /**
@@ -2299,6 +2406,7 @@ function MenuWorkspaces() {
   const look = useWorkspaceLook();
   const notes = workspaceNotes(t, i18n.language, me.organizations);
   const groups = useWorkspaceGroups({ orgs: me.organizations, currentOrgId: org.id });
+  const api = useApi();
   const navigate = useNavigate();
   const go = (orgId: string) => void navigate({ to: "/org/$orgId", params: { orgId } });
   const newWorkspace = offersNewWorkspace(me.user.canCreateWorkspace, groups) && (
@@ -2306,14 +2414,29 @@ function MenuWorkspaces() {
       {t("shell.newWorkspace")}
     </MenuItem>
   );
+  const addAccount = (
+    <MenuItem
+      icon="plus"
+      description={t("shell.addAccountHint")}
+      onSelect={() => void navigate({ to: "/login", search: { add: true } })}
+    >
+      {t("shell.addAccount")}
+    </MenuItem>
+  );
   if (groups)
     return (
       <>
         <MenuHeading>{t("shell.yourWorkspaces")}</MenuHeading>
         {groups.map((g) => (
-          <Fragment key={g.server}>
-            {groups.length > 1 && (
-              <MenuHeading>{g.cloud ? g.name : `${g.name} · ${t("shell.yourServer")}`}</MenuHeading>
+          <Fragment key={groupKey(g)}>
+            {groups.length > 1 && <MenuHeading>{groupTitle(t, g)}</MenuHeading>}
+            {accountAlone(g) && (
+              <MenuItem
+                leading={<Avatar kind="person" name={g.account.name} size="sm" />}
+                onSelect={() => void switchAccount(api, g.account.userId).catch(() => {})}
+              >
+                {g.account.name}
+              </MenuItem>
             )}
             {g.rows.map((o) => {
               const shown = g.here ? look(o, "sm", 20) : look({ ...o, id: "" }, "sm", 20);
@@ -2326,8 +2449,9 @@ function MenuWorkspaces() {
                     o.current ? t("shell.youAreHere") : o.unread > 0 ? <CountChip>{o.unread}</CountChip> : undefined
                   }
                   onSelect={() => {
-                    if (!g.here) void thisMac.openWorkspace(g.server, o.id).catch(() => {});
-                    else if (!o.current) go(o.id);
+                    if (g.here) {
+                      if (!o.current) go(o.id);
+                    } else openElsewhere(api, g, o.id);
                   }}
                 >
                   {shown.name}
@@ -2337,13 +2461,16 @@ function MenuWorkspaces() {
             {g.here && newWorkspace}
           </Fragment>
         ))}
-        <MenuItem
-          icon="plus"
-          description={t("shell.addWorkspaceHint")}
-          onSelect={() => void thisMac.addWorkspace().catch(() => {})}
-        >
-          {t("shell.addWorkspace")}
-        </MenuItem>
+        {groups.some((g) => g.desktop) && (
+          <MenuItem
+            icon="plus"
+            description={t("shell.addWorkspaceHint")}
+            onSelect={() => void thisMac.addWorkspace().catch(() => {})}
+          >
+            {t("shell.addWorkspace")}
+          </MenuItem>
+        )}
+        {addAccount}
       </>
     );
   return (
@@ -2364,8 +2491,35 @@ function MenuWorkspaces() {
         );
       })}
       {newWorkspace}
+      {addAccount}
     </>
   );
+}
+
+/** A group's key in "Your workspaces": a server has one group per account (ADR 0183). */
+const groupKey = (g: WorkspaceGroup) => `${g.server} ${g.account?.userId ?? ""}`;
+
+/**
+ * A group's line in "Your workspaces" as words: its server in the desktop app (ADR 0154), and whose account it is
+ * where a server has several (ADR 0183); outside the app there is one server, so the account alone.
+ */
+function groupTitle(t: TFunction, g: WorkspaceGroup): string {
+  if (!g.desktop) return g.account?.email ?? g.name;
+  const server = g.cloud ? g.name : `${g.name} · ${t("shell.yourServer")}`;
+  return g.several && g.account ? `${server} · ${g.account.email}` : server;
+}
+
+/** Another account of this browser with no workspace yet: its own row is the way to it. */
+const accountAlone = (g: WorkspaceGroup): g is WorkspaceGroup & { account: NonNullable<WorkspaceGroup["account"]> } =>
+  g.sameServer && !g.here && g.account !== null && g.rows.length === 0;
+
+/**
+ * Opens a workspace that isn't the open account's: another account of this browser on this server (the browser moves
+ * to it, ADR 0183), or another server of the desktop app (the window goes there, as the account it belongs to).
+ */
+function openElsewhere(api: ApiClient, g: WorkspaceGroup, orgId: string) {
+  if (g.sameServer && g.account) void switchAccount(api, g.account.userId, `/org/${orgId}`).catch(() => {});
+  else void thisMac.openWorkspace(g.server, orgId, g.account?.userId).catch(() => {});
 }
 
 /**
@@ -2476,11 +2630,12 @@ function WorkspaceMenuOptions({ onDone }: { onDone: () => void }) {
   const look = useWorkspaceLook();
   const notes = workspaceNotes(t, i18n.language, me.organizations);
   const groups = useWorkspaceGroups({ orgs: me.organizations, currentOrgId: org.id });
+  const api = useApi();
   const navigate = useNavigate();
   const overview = useOverview(org.id);
   const managesAgents = can(org, "manage_agents");
   const connections = useConnections(org.id);
-  const skills = useSkills(org.id, managesAgents);
+  const skills = useSkills(org.id);
   const invite = useInviteDialog();
   const go = (section?: SettingsSection) => () => {
     onDone();
@@ -2504,6 +2659,18 @@ function WorkspaceMenuOptions({ onDone }: { onDone: () => void }) {
       }}
     >
       {t("shell.newWorkspace")}
+    </MenuOverlayItem>
+  );
+  const addAccount = (
+    <MenuOverlayItem
+      icon="plus"
+      description={t("shell.addAccountHint")}
+      onSelect={() => {
+        onDone();
+        void navigate({ to: "/login", search: { add: true } });
+      }}
+    >
+      {t("shell.addAccount")}
     </MenuOverlayItem>
   );
   let key = 0;
@@ -2532,16 +2699,9 @@ function WorkspaceMenuOptions({ onDone }: { onDone: () => void }) {
             {t("settings.section.access")}
           </MenuOverlayItem>
         )}
-        {managesAgents && (
-          <MenuOverlayItem
-            icon="book"
-            shortcut={next()}
-            count={skills.data?.length || undefined}
-            onSelect={go("skills")}
-          >
-            {t("settings.section.skills")}
-          </MenuOverlayItem>
-        )}
+        <MenuOverlayItem icon="book" shortcut={next()} count={skills.data?.length || undefined} onSelect={go("skills")}>
+          {t("settings.section.skills")}
+        </MenuOverlayItem>
         <MenuOverlayItem icon="settings" shortcut={next()} onSelect={go()}>
           {t("shell.workspaceSettings")}
         </MenuOverlayItem>
@@ -2551,11 +2711,16 @@ function WorkspaceMenuOptions({ onDone }: { onDone: () => void }) {
           <>
             {/* The desktop app (ADR 0154): every server's workspaces, by server, each with its unread count. */}
             {groups.map((g) => (
-              <Fragment key={g.server}>
-                {groups.length > 1 && (
+              <Fragment key={groupKey(g)}>
+                {groups.length > 1 && !g.desktop && (
+                  // Outside the app there is one server: each group is one of the browser's accounts (ADR 0183).
+                  <span className="sidebar__menu-server">{g.account?.email ?? g.name}</span>
+                )}
+                {groups.length > 1 && g.desktop && (
                   <span className="sidebar__menu-server" data-state={g.state}>
                     <Icon name={g.cloud ? "cloud" : g.thisComputer ? "computer" : "globe"} size={14} />
                     {g.thisComputer ? t("shell.serverHere") : g.name}
+                    {g.several && g.account && <em>· {g.account.email}</em>}
                     {/* Its state as words in the line, never a pill (ADR 0158): stopped, offline since, signed out. */}
                     {g.state === "offline" ? (
                       <em className="sidebar__menu-server-state">
@@ -2585,6 +2750,17 @@ function WorkspaceMenuOptions({ onDone }: { onDone: () => void }) {
                     )}
                   </span>
                 )}
+                {accountAlone(g) && (
+                  <MenuOverlayItem
+                    leading={<Avatar kind="person" name={g.account.name} size="md" />}
+                    onSelect={() => {
+                      onDone();
+                      void switchAccount(api, g.account.userId).catch(() => {});
+                    }}
+                  >
+                    {g.account.name}
+                  </MenuOverlayItem>
+                )}
                 {g.rows.map((o) => {
                   const here = g.here ? me.organizations.find((m) => m.id === o.id) : undefined;
                   const shown = look(here ? o : { ...o, id: "" }, "md", 32);
@@ -2608,7 +2784,7 @@ function WorkspaceMenuOptions({ onDone }: { onDone: () => void }) {
                       }
                       onSelect={() => {
                         onDone();
-                        if (!g.here) void thisMac.openWorkspace(g.server, o.id).catch(() => {});
+                        if (!g.here) openElsewhere(api, g, o.id);
                         else if (!o.current) void navigate({ to: "/org/$orgId", params: { orgId: o.id } });
                       }}
                     >
@@ -2620,16 +2796,19 @@ function WorkspaceMenuOptions({ onDone }: { onDone: () => void }) {
               </Fragment>
             ))}
             <MenuOverlaySeparator />
-            <MenuOverlayItem
-              icon="plus"
-              description={t("shell.addWorkspaceHint")}
-              onSelect={() => {
-                onDone();
-                void thisMac.addWorkspace().catch(() => {});
-              }}
-            >
-              {t("shell.addWorkspace")}
-            </MenuOverlayItem>
+            {groups.some((g) => g.desktop) && (
+              <MenuOverlayItem
+                icon="plus"
+                description={t("shell.addWorkspaceHint")}
+                onSelect={() => {
+                  onDone();
+                  void thisMac.addWorkspace().catch(() => {});
+                }}
+              >
+                {t("shell.addWorkspace")}
+              </MenuOverlayItem>
+            )}
+            {addAccount}
           </>
         ) : (
           <>
@@ -2654,12 +2833,9 @@ function WorkspaceMenuOptions({ onDone }: { onDone: () => void }) {
                 </MenuOverlayItem>
               );
             })}
-            {newWorkspace && (
-              <>
-                <MenuOverlaySeparator />
-                {newWorkspace}
-              </>
-            )}
+            <MenuOverlaySeparator />
+            {newWorkspace}
+            {addAccount}
           </>
         )}
       </MenuOverlayGroup>

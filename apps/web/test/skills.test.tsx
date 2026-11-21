@@ -9,7 +9,7 @@ import { act, cleanup, fireEvent, within } from "@testing-library/react";
 import { createI18n } from "@/i18n";
 import { setNavigateAway } from "@/lib/navigate";
 import { declarations, topLevel } from "./built-css";
-import { ADA_ID, createFakeApi, ORG_ID, seedState } from "./fake-api";
+import { ADA_ID, ATLAS_ID, createFakeApi, ORG_ID, seedState } from "./fake-api";
 import { proceed, startAs } from "./new-agent-flow";
 import { renderApp, screen, settle } from "./render";
 
@@ -122,6 +122,32 @@ describe("Configurações → Skills", () => {
     await settle(4);
     expect(state.calls.some((c) => c.method === "skills.remove")).toBe(true);
     expect(screen().getByText("Revisão de PR removida.")).toBeTruthy();
+  });
+
+  test("detail: which agents have it, and Escolher agentes gives it or takes it away, one call per agent changed", async () => {
+    const { state, section } = await settings();
+    // The library's row already shows who has it, face by face.
+    const row = within(section()).getByRole("button", { name: "Revisão de PR" }).closest(".skill-row") as HTMLElement;
+    expect(within(row).getByRole("img", { name: "Ada" })).toBeTruthy();
+    await click(within(section()).getByRole("button", { name: "Revisão de PR" }));
+    await settle(4);
+    const sheet = screen().getByRole("dialog", { name: "Revisão de PR" });
+    const holders = within(sheet).getByRole("region", { name: "Agentes com esta skill" });
+    expect(holders.textContent).toContain("Ada");
+    await click(within(holders).getByRole("button", { name: "Escolher agentes" }));
+    const pick = screen().getByRole("dialog", { name: "Agentes com Revisão de PR" });
+    await click(within(pick).getByRole("switch", { name: "Ada" }));
+    await click(within(pick).getByRole("switch", { name: "Atlas" }));
+    await click(within(pick).getByRole("button", { name: "Salvar" }));
+    await settle(6);
+    const sent = state.calls.filter((c) => c.method === "skills.setForAgent").map((c) => [c.args[1], c.args[2]]);
+    const skillId = (sent[0]?.[1] as { skillId: string }[] | undefined)?.[0]?.skillId;
+    expect(sent).toEqual([
+      [ADA_ID, [{ skillId, enabled: false }]],
+      [ATLAS_ID, [{ skillId, enabled: true }]],
+    ]);
+    expect(screen().queryByRole("dialog", { name: "Agentes com Revisão de PR" })).toBeNull();
+    expect(within(holders).getByText("Atlas")).toBeTruthy();
   });
 
   test("Agentes melhoram as skills sozinhos: the workspace's switch, a skill's own, and Desfazer for an agent's change", async () => {
@@ -250,6 +276,52 @@ describe("Configurações → Skills", () => {
     expect(within(failed).getByRole("button", { name: "Tentar de novo" })).toBeTruthy();
   });
 
+  test("Instalar skill › Enviar .zip: a .zip past the limit is refused when picked; one on its way shows how much went, and Cancelar stops it", async () => {
+    const { api, section } = await settings();
+    const pending: { input: unknown; progress?: (sent: number) => void; signal?: AbortSignal }[] = [];
+    api.skills.import = (_org, input, upload) =>
+      new Promise((_, reject) => {
+        pending.push({ input, progress: upload?.onProgress, signal: upload?.signal });
+        upload?.signal?.addEventListener("abort", () =>
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+        );
+      });
+    await click(within(section()).getByRole("button", { name: "Instalar skill" }));
+    const dialog = screen().getByRole("dialog", { name: "Instalar skill" });
+    await pickTab(within(dialog).getByRole("tab", { name: "Enviar .zip" }));
+    const pick = async (name: string, size: number) => {
+      const input = dialog.querySelector('input[type="file"]') as HTMLInputElement;
+      const file = new File([new Uint8Array([80, 75, 3, 4])], name, { type: "application/zip" });
+      Object.defineProperty(file, "size", { value: size });
+      await act(async () => {
+        fireEvent.change(input, { target: { files: [file] } });
+      });
+    };
+    await pick("repositorio-inteiro.zip", 150 * 1024 * 1024);
+    expect(within(dialog).getByRole("alert").textContent).toBe(
+      "repositorio-inteiro.zip tem 150 MB. O .zip de uma skill pode ter até 56 MB.",
+    );
+    expect((within(dialog).getByRole("button", { name: "Instalar" }) as HTMLButtonElement).disabled).toBe(true);
+    // The way out is a button: the GitHub tab, which reads only the skill's folder.
+    await click(within(dialog).getByRole("button", { name: "Usar um link do GitHub" }));
+    expect(within(dialog).getByRole("tab", { name: "Link do GitHub" }).getAttribute("aria-selected")).toBe("true");
+    await pickTab(within(dialog).getByRole("tab", { name: "Enviar .zip" }));
+
+    await pick("skill.zip", 4);
+    expect(within(dialog).queryByRole("alert")).toBeNull();
+    await click(within(dialog).getByRole("button", { name: "Instalar" }));
+    await settle(4);
+    expect(pending).toHaveLength(1);
+    await act(async () => pending[0]?.progress?.(0.42));
+    expect(dialog.textContent).toContain("Enviando o arquivo… 42%");
+    // Nothing to change while it goes: the tabs and the picker are locked.
+    expect(within(dialog).getByRole("tab", { name: "Escrever" }).closest("fieldset")?.disabled).toBe(true);
+    await click(within(dialog).getByRole("button", { name: "Cancelar" }));
+    await settle(4);
+    expect(pending[0]?.signal?.aborted).toBe(true);
+    expect(screen().queryByRole("dialog", { name: "Instalar skill" })).toBeNull();
+  });
+
   test("Instalar skill: GitHub link, .zip and Escrever", async () => {
     const { state, section } = await settings();
     await click(within(section()).getByRole("button", { name: "Instalar skill" }));
@@ -275,7 +347,8 @@ describe("Configurações → Skills", () => {
     dialog = screen().getByRole("dialog", { name: "Instalar skill" });
     await pickTab(within(dialog).getByRole("tab", { name: "Enviar .zip" }));
     // What the .zip holds, nothing about its scripts: they can run on the agent's computer, as its sheet says.
-    expect(within(dialog).getByText(/^Um \.zip/).textContent).toBe("Um .zip com o SKILL.md na raiz.");
+    expect(within(dialog).getByText(/^Um \.zip/).textContent).toStartWith("Um .zip da pasta da skill, até 56 MB.");
+    expect(within(dialog).getByText(/^Um \.zip/).textContent).not.toContain("script");
     expect(dialog.querySelector('input[type="file"]')?.className).toContain("ac-visually-hidden");
     const file = new File([new Uint8Array([80, 75, 3, 4])], "suporte.zip", { type: "application/zip" });
     await act(async () => {
@@ -349,12 +422,57 @@ describe("Configurações → Skills", () => {
     ).toEqual(["Extra 3"]);
   });
 
-  test("members don't see the library", async () => {
+  test("a member keeps skills of their own: Pessoal first, installed for them, the team's read only", async () => {
     const state = seedState();
     if (state.me?.organizations[0]) state.me.organizations[0].role = "member";
-    const { api } = await settings(state);
-    expect(screen().queryByRole("region", { name: "Skills" })).toBeNull();
-    expect(api).toBeTruthy();
+    const { section } = await settings(state);
+    const personal = within(section()).getByRole("radio", { name: /Pessoal/ });
+    expect(personal.getAttribute("aria-checked")).toBe("true");
+    expect(section().textContent).toContain("Guarde suas skills");
+    await click(within(section()).getAllByRole("button", { name: "Instalar skill" })[0] as HTMLElement);
+    const dialog = screen().getByRole("dialog", { name: "Instalar skill" });
+    const forWhom = within(dialog).getByRole("radiogroup", { name: "Para quem" });
+    expect(within(forWhom).getByRole("radio", { name: "Pessoal" }).getAttribute("aria-checked")).toBe("true");
+    expect(dialog.textContent).toContain("Só quem gerencia agentes adiciona skills da equipe.");
+    await pickTab(within(dialog).getByRole("tab", { name: "Escrever" }));
+    await type(within(dialog).getByLabelText("Nome"), "meu-tom");
+    await type(within(dialog).getByLabelText("Quando usar"), "Ao escrever e-mails.");
+    await type(within(dialog).getByLabelText("Instruções (Markdown)"), "# Tom\n\n1. Curto.");
+    await click(within(dialog).getByRole("button", { name: "Instalar" }));
+    await settle(6);
+    expect(state.calls.find((c) => c.method === "skills.create")?.args[1]).toMatchObject({
+      name: "meu-tom",
+      personal: true,
+    });
+    const mine = screen().getByRole("dialog", { name: "meu-tom" });
+    expect(within(mine).getByRole("button", { name: "Editar" })).toBeTruthy();
+    await click(within(mine).getAllByRole("button", { name: "Fechar" })[0] as HTMLElement);
+    await settle(2);
+    expect(section().textContent).toContain("Só você vê estas skills. Seus agentes usam quando você pede.");
+    expect(within(section()).getByRole("button", { name: "meu-tom" })).toBeTruthy();
+
+    await click(within(section()).getByRole("radio", { name: /Equipe/ }));
+    expect(within(section()).queryByRole("button", { name: "Instalar skill" })).toBeNull();
+    await click(within(section()).getByRole("button", { name: "Revisão de PR" }));
+    await settle(4);
+    const sheet = screen().getByRole("dialog", { name: "Revisão de PR" });
+    expect(within(sheet).queryByRole("button", { name: "Editar" })).toBeNull();
+    expect(within(sheet).queryByRole("button", { name: "Remover" })).toBeNull();
+  });
+
+  test("who manages agents sees others' personal skills by name and person, with Remover only", async () => {
+    const state = seedState();
+    const api = createFakeApi(state);
+    await api.skills.list(ORG_ID);
+    const joao = state.members.find((m) => m.userId !== state.me?.user.id);
+    const theirs = await api.skills.create(ORG_ID, { name: "propostas", description: "De outra pessoa.", body: "# x" });
+    // Someone else's personal skill, as the server lists it to an admin: name and person only.
+    await api.skills.update(ORG_ID, theirs.id, { ownerUserId: joao?.userId } as never);
+    const { section } = await settings(state, api);
+    const others = within(section()).getByRole("region", { name: /Pessoais de outras pessoas/ });
+    expect(others.textContent).toContain("propostas");
+    expect(others.textContent).toContain(joao?.name ?? "?");
+    expect(within(section()).getByRole("radio", { name: /Equipe/ }).textContent).toContain("3");
   });
 });
 

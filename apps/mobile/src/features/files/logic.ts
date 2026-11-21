@@ -1,6 +1,7 @@
 import type { ArtifactDetail, ArtifactKind } from "@agenteschat/client";
-import { fileIcon, previewType } from "@agenteschat/client/lib/files";
+import { extensionOf, fileIcon, isMarkdownFile, previewKind, previewType } from "@agenteschat/client/lib/files";
 import { filePath } from "@agenteschat/client/lib/message-links";
+import { type LiveScreen, liveRoute, opensLive, type PhoneLiveKind } from "../live-files/routes";
 
 /**
  * Files on a message: which ones show as pictures, the card's tile and
@@ -8,10 +9,22 @@ import { filePath } from "@agenteschat/client/lib/message-links";
  */
 
 /**
- * How the app shows a file: inline picture or video, the document screen (Markdown, text, PDF, Office files and
- * tables, a ZIP's contents, audio), or only its card.
+ * How the app shows a file: inline picture or video, the document screen (Markdown, text, PDF), a live file's own
+ * screen (ADR 0196), an Office file as the server read it (ADR 0198: a workbook's grid, a deck's slides, a Word
+ * document's page; an old table in the same grid), or only its card.
  */
-export type FileView = "image" | "video" | "markdown" | "text" | "pdf" | "office" | "archive" | "audio" | "other";
+export type FileView =
+  | "image"
+  | "video"
+  | "markdown"
+  | "text"
+  | "pdf"
+  | "html"
+  | "live"
+  | "sheet"
+  | "deck"
+  | "word"
+  | "other";
 
 /** The word under the name ("Imagem", "PDF", "Documento"…): `mobile.files.type.<key>`. */
 export type FileTypeKey =
@@ -26,6 +39,9 @@ export type FileTypeKey =
   | "diagram"
   | "page"
   | "text"
+  | "spreadsheet"
+  | "slides"
+  | "canvas"
   | "file";
 
 export interface FileInfo {
@@ -41,87 +57,18 @@ export interface FileInfo {
   mime: string;
 }
 
-/** Picture types the app draws (expo-image, which also draws SVG and BMP). */
-const IMAGE_TYPES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "image/heic",
-  "image/heif",
-  "image/svg+xml",
-  "image/bmp",
-]);
+/** Raster types the app draws (expo-image); SVG and the rest open as a card. */
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/heic", "image/heif"]);
 /** Video types the phones play (expo-video); WebM only plays on Android, so iPhone falls back to the card. */
 const VIDEO_TYPES = new Set(["video/mp4", "video/quicktime", "video/x-m4v", "video/webm"]);
 /** Names that already say "video" while the file's details load (no jump from card to player). */
 export const VIDEO_EXT = new Set(["mp4", "mov", "m4v", "webm"]);
 /** Names that say "picture": while the details load, and when the stored type doesn't (an upload typed as bytes). */
-export const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "bmp"]);
-const MARKDOWN_EXT = new Set(["md", "markdown", "mdx"]);
-/** Plain text and source code, shown as text. */
-const TEXT_EXT = new Set([
-  ...["txt", "log", "json", "jsonl", "yml", "yaml", "toml", "xml", "ini", "env", "conf", "cfg", "properties"],
-  ...["js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "rb", "go", "rs", "java", "kt", "kts", "swift", "c", "h"],
-  ...["cc", "cpp", "hpp", "cs", "php", "lua", "r", "dart", "scala", "sh", "bash", "zsh", "ps1", "bat", "sql"],
-  ...["css", "scss", "less", "html", "htm", "vue", "svelte", "patch", "diff", "gradle", "dockerfile", "srt", "vtt"],
-]);
-/**
- * Office files and tables, drawn by the app's preview page (`officeKindOf`). iPhones also show the older and Apple
- * formats natively; Android shows those as their card.
- */
-const OFFICE_EXT = new Set([
-  "docx",
-  "xlsx",
-  "xlsm",
-  "xls",
-  "ods",
-  "pptx",
-  "csv",
-  "tsv",
-  "doc",
-  "ppt",
-  "key",
-  "pages",
-  "numbers",
-]);
-const OFFICE_TYPES = new Set([
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  "application/vnd.ms-excel",
-  "application/vnd.ms-powerpoint",
-  "application/msword",
-  "text/csv",
-  "text/tab-separated-values",
-]);
-const ARCHIVE_EXT = new Set(["zip"]);
-/** Audio the phones play (expo-video plays sound alone too). */
-const AUDIO_EXT = new Set(["mp3", "m4a", "aac", "wav", "ogg", "oga", "opus", "flac", "amr"]);
+export const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "heic", "heif"]);
+const TEXT_EXT = new Set(["txt", "log", "csv", "tsv", "json", "yml", "yaml", "toml", "xml", "ini", "env"]);
 
-/** What the preview page draws for an Office file or a table ("" for a format only iPhones show natively). */
-export type OfficeKind = "docx" | "sheet" | "csv" | "pptx" | "";
-
-export function officeKindOf(name: string, mime = ""): OfficeKind {
-  const ext = extensionOf(name);
-  if (ext === "docx" || mime.endsWith("wordprocessingml.document")) return "docx";
-  if (ext === "pptx" || mime.endsWith("presentationml.presentation")) return "pptx";
-  if (ext === "csv" || ext === "tsv" || mime === "text/csv" || mime === "text/tab-separated-values") return "csv";
-  if (
-    ["xlsx", "xlsm", "xls", "ods"].includes(ext) ||
-    mime.endsWith("spreadsheetml.sheet") ||
-    mime === "application/vnd.ms-excel"
-  )
-    return "sheet";
-  return "";
-}
-
-/**
- * Non-file artifacts: the extension their download gets (as the server names them). Keyed by any string: a newer
- * server sends kinds this app doesn't know yet (live spreadsheets, slides and canvases since 0.1.10), which must
- * still draw as a card instead of breaking the conversation.
- */
-const KIND_EXT: Record<Exclude<ArtifactKind, "file">, string> & Record<string, string | undefined> = {
+/** Non-file artifacts: the extension their download gets (as the server names them). */
+const KIND_EXT: Record<Exclude<ArtifactKind, "file">, string> = {
   document: "md",
   table: "csv",
   diff: "patch",
@@ -130,11 +77,13 @@ const KIND_EXT: Record<Exclude<ArtifactKind, "file">, string> & Record<string, s
   block: "html",
   poll: "json",
   choices: "json",
+  // A live file downloads as the Office file other apps open (ADR 0198); a canvas as its shapes.
   spreadsheet: "xlsx",
   slides: "pptx",
+  canvas: "json",
 };
 
-const KIND_TYPE: Record<Exclude<ArtifactKind, "file">, FileTypeKey> & Record<string, FileTypeKey | undefined> = {
+const KIND_TYPE: Record<Exclude<ArtifactKind, "file">, FileTypeKey> = {
   document: "document",
   table: "table",
   diff: "diff",
@@ -143,15 +92,12 @@ const KIND_TYPE: Record<Exclude<ArtifactKind, "file">, FileTypeKey> & Record<str
   block: "page",
   poll: "file",
   choices: "file",
-  spreadsheet: "table",
-  slides: "file",
+  spreadsheet: "spreadsheet",
+  slides: "slides",
+  canvas: "canvas",
 };
 
-/** "relatorio.final.PDF" → "pdf" ("" without one). */
-export function extensionOf(name: string): string {
-  const m = /\.([a-z0-9]{1,8})$/i.exec(name.trim());
-  return m?.[1]?.toLowerCase() ?? "";
-}
+export { extensionOf, isCodeName } from "@agenteschat/client/lib/files";
 
 /** The tile's label: "MD", "PDF", "JPEG" (4 letters at most); "" → the caller shows an icon. */
 export const extLabel = (ext: string) => ext.slice(0, 4).toUpperCase();
@@ -186,24 +132,47 @@ export function fileInfo(a: Pick<ArtifactDetail, "kind" | "title" | "content">):
     const mime = previewType(c.contentType);
     // The type says what it is; a file stored as plain bytes goes by its name.
     const untyped = !mime || mime === "application/octet-stream";
+    // Spreadsheets, decks and Word documents the server reads for the app to draw (ADR 0198), CSV included.
+    const office = OFFICE_VIEW[previewKind(mime, name) ?? ""];
     let view: FileView = "other";
     if (IMAGE_TYPES.has(mime) || (untyped && IMAGE_EXT.has(ext))) view = "image";
     else if (VIDEO_TYPES.has(mime) || (untyped && VIDEO_EXT.has(ext))) view = "video";
     else if (mime === "application/pdf" || ext === "pdf") view = "pdf";
-    else if (MARKDOWN_EXT.has(ext) || mime === "text/markdown") view = "markdown";
-    else if (OFFICE_EXT.has(ext) || OFFICE_TYPES.has(mime)) view = "office";
-    else if (ARCHIVE_EXT.has(ext) || mime === "application/zip" || mime === "application/x-zip-compressed")
-      view = "archive";
-    else if (AUDIO_EXT.has(ext) || mime.startsWith("audio/")) view = "audio";
+    else if (office) view = office;
+    // A page is shown as a page (its source isn't the point), before the text types it is one of.
+    else if (mime === "text/html" || ext === "html" || ext === "htm") view = "html";
+    else if (isMarkdownFile(name, mime)) view = "markdown";
     else if (TEXT_EXT.has(ext) || mime.startsWith("text/")) view = "text";
     return { name, view, type: fileType(name, mime, view), ext: extLabel(ext), size: c.size, mime };
   }
-  const ext = KIND_EXT[c.kind] ?? "";
+  // A kind from a newer server than this app (its tables don't list it yet) draws as a plain card, not a crash.
+  const ext = (KIND_EXT as Record<string, string | undefined>)[c.kind] ?? "";
   const name = withExtension(a.title ?? "", ext);
-  const view: FileView = c.kind === "document" ? "markdown" : "other";
+  // A document is a live file (ADR 0200): it opens on its own screen as every live kind.
+  const view: FileView = opensLive(c.kind)
+    ? "live"
+    : c.kind === "html"
+      ? "html"
+      : c.kind === "table"
+        ? "sheet"
+        : "other";
   const size = c.kind === "document" ? utf8Bytes(c.markdown) : null;
-  return { name, view, type: KIND_TYPE[c.kind] ?? "file", ext: extLabel(ext), size, mime: "" };
+  return {
+    name,
+    view,
+    type: (KIND_TYPE as Record<string, FileTypeKey | undefined>)[c.kind] ?? "file",
+    ext: extLabel(ext),
+    size,
+    mime: "",
+  };
 }
+
+/** The Office previews, by the kind `previewKind` names them. */
+const OFFICE_VIEW: Record<string, FileView> = {
+  "office-sheet": "sheet",
+  "office-slides": "deck",
+  "office-doc": "word",
+};
 
 function fileType(name: string, mime: string, view: FileView): FileTypeKey {
   if (view === "image") return "image";
@@ -216,6 +185,7 @@ function fileType(name: string, mime: string, view: FileView): FileTypeKey {
   if (icon === "code") return "code";
   if (icon === "archive") return "archive";
   if (icon === "page") return "page";
+  if (icon === "slides") return "slides";
   if (icon === "document") return view === "text" ? "text" : "document";
   return view === "text" ? "text" : "file";
 }
@@ -296,12 +266,14 @@ export function resolveDownloadUrl(apiUrl: string, url: string): { uri: string; 
 
 /**
  * Where a shared copy comes from: the text the app already has (documents, diagrams, pages, small
- * text files), or a download (uploaded files, and tables and code changes as CSV / .patch exports).
+ * text files), or a download (uploaded files, tables and code changes as CSV / .patch exports, live files as the
+ * Office file other apps open).
  */
 export type ShareSource =
   | { from: "text"; text: string; name: string; mime: string }
   | { from: "download"; name: string; mime: string }
-  | { from: "export"; format: "csv" | "patch"; name: string; mime: string };
+  /** Made by the server: a table's CSV, a change's .patch, a live file as it is now (no format: a canvas's JSON). */
+  | { from: "export"; format?: "csv" | "patch" | "xlsx" | "pptx"; name: string; mime: string };
 
 export function shareSource(a: Pick<ArtifactDetail, "kind" | "title" | "content">): ShareSource {
   const info = fileInfo(a);
@@ -336,6 +308,23 @@ export function shareSource(a: Pick<ArtifactDetail, "kind" | "title" | "content"
       return { from: "export", format: "csv", name, mime: "text/csv" };
     case "diff":
       return { from: "export", format: "patch", name, mime: "text/x-patch" };
+    // A live file as the Office file other apps open, made from it as it is now (ADR 0198).
+    case "spreadsheet":
+      return {
+        from: "export",
+        format: "xlsx",
+        name,
+        mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      };
+    case "slides":
+      return {
+        from: "export",
+        format: "pptx",
+        name,
+        mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      };
+    case "canvas":
+      return { from: "export", name, mime: "application/json" };
     case "file":
       return { from: "download", name, mime: info.mime };
   }
@@ -348,8 +337,73 @@ export function pageStep(index: number, by: -1 | 1, count: number): number | nul
 }
 
 /** `id@version` pairs for the picture viewer's route (`?files=a@2,b@1`), and back. */
-export function encodeFileList(files: { id: string; version?: number }[]): string {
+export function encodeFileList(files: { id: string; version?: number | undefined }[]): string {
   return files.map((f) => (f.version ? `${f.id}@${f.version}` : f.id)).join(",");
+}
+
+/** A file as it's opened from where it shows: what's known of it before (or once) its details load. */
+export interface FileRef {
+  id: string;
+  /** The version shown there, when it's a particular one. */
+  version?: number | undefined;
+  /** Its name: "print.png" already says it's a picture while its details load. */
+  title?: string | undefined;
+  kind?: ArtifactKind | undefined;
+  /** Its details, once loaded: what it is for sure. */
+  detail?: Pick<ArtifactDetail, "kind" | "title" | "content" | "shownVersion" | "version"> | undefined;
+}
+
+/**
+ * A picture or a video, which open in the picture viewer: by its details when they're known (`fileInfo`), else by
+ * its name, as `fileInfo` reads an upload stored without a type.
+ */
+export function isMediaFile(ref: FileRef): boolean {
+  if (ref.detail) {
+    const view = fileInfo(ref.detail).view;
+    return view === "image" || view === "video";
+  }
+  if (ref.kind !== undefined && ref.kind !== "file") return false;
+  const ext = extensionOf(ref.title ?? "");
+  return IMAGE_EXT.has(ext) || VIDEO_EXT.has(ext);
+}
+
+export type FileRoute =
+  | { pathname: "/images"; params: { files: string; at: string; from?: string } }
+  | { pathname: "/file/[id]"; params: { id: string; v?: string } }
+  | { pathname: LiveScreen; params: { id: string } };
+
+/** A live file's kind, from its details or from the kind the place names (ADR 0196). */
+export function liveKindOfRef(ref: FileRef): PhoneLiveKind | null {
+  const kind = ref.detail?.kind ?? ref.kind;
+  return opensLive(kind) ? kind : null;
+}
+
+/**
+ * Where a file opens, the one way in from every place that shows one: a picture or a video straight in the picture
+ * viewer, among the pictures and videos beside it (`siblings`, in the order they show, so the viewer pages through
+ * them) at the one tapped; a live file on its own screen, as it is now (ADR 0196 §9); anything else in the file screen,
+ * at an older version when that's the one shown. `from`: the deck it opened from, told where the person stops.
+ */
+export function fileRoute(ref: FileRef, siblings?: readonly FileRef[], from?: string): FileRoute {
+  const live = liveKindOfRef(ref);
+  if (live) return liveRoute(live, ref.id);
+  if (!isMediaFile(ref)) {
+    // Its details say whether the version shown is an older one; without them, the version the place names.
+    const older = ref.detail && ref.detail.shownVersion < ref.detail.version ? ref.detail.shownVersion : undefined;
+    const v = ref.detail ? older : ref.version;
+    return { pathname: "/file/[id]", params: { id: ref.id, ...(v ? { v: String(v) } : {}) } };
+  }
+  const media = (siblings ?? []).filter(isMediaFile);
+  const at = media.findIndex((f) => f.id === ref.id);
+  const pages = at >= 0 ? media : [ref];
+  return {
+    pathname: "/images",
+    params: {
+      files: encodeFileList(pages.map((f) => ({ id: f.id, version: f.detail?.shownVersion ?? f.version }))),
+      at: String(Math.max(at, 0)),
+      ...(from ? { from } : {}),
+    },
+  };
 }
 
 export function decodeFileList(raw: string | string[] | undefined): { id: string; version?: number }[] {
@@ -360,4 +414,61 @@ export function decodeFileList(raw: string | string[] | undefined): { id: string
     const n = v ? Number(v) : Number.NaN;
     return [Number.isInteger(n) && n > 0 ? { id, version: n } : { id }];
   });
+}
+
+/** Names that are never a picture or a video: they open the file screen without asking for the details first. */
+const DOCUMENT_EXT = new Set([
+  ...["md", "markdown", "mdx", "txt", "log", "csv", "tsv", "json", "yml", "yaml", "toml", "xml", "ini", "env"],
+  ...["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "html", "htm"],
+  ...["zip", "tar", "gz", "patch", "diff", "js", "ts", "tsx", "py", "rb", "go", "rs", "java", "swift", "sql", "sh"],
+]);
+
+/**
+ * Its details, or its kind and name, already say where a file opens: a picture's or a video's name, or a document's.
+ * A name with no extension, or one the app doesn't know (a video in a rarer format), says nothing.
+ */
+export function whereKnown(ref: FileRef): boolean {
+  if (ref.detail) return true;
+  if (ref.kind !== undefined && ref.kind !== "file") return true;
+  return isMediaFile(ref) || DOCUMENT_EXT.has(extensionOf(ref.title ?? ""));
+}
+
+/**
+ * A long text in pieces of at most `lines` lines and `chars` characters each, drawn one under the other: one text view
+ * as tall as a long file goes past what the phone can draw in one piece, and showed blank. A line longer than a piece
+ * (minified code, data on one line) is cut into pieces of its own, so a cut inside a line falls between two pieces and
+ * every newline left inside a piece is the text's own.
+ */
+export function textChunks(text: string, lines = 120, chars = 6000): string[] {
+  const out: string[] = [];
+  let piece: string[] = [];
+  let size = 0;
+  for (const whole of text.split("\n")) {
+    for (const line of lineParts(whole, chars)) {
+      if (piece.length > 0 && (piece.length >= lines || size + line.length > chars)) {
+        out.push(piece.join("\n"));
+        piece = [];
+        size = 0;
+      }
+      piece.push(line);
+      size += line.length + 1;
+    }
+  }
+  if (piece.length > 0 || out.length === 0) out.push(piece.join("\n"));
+  return out;
+}
+
+/** `line` in parts of at most `size` characters, never between the two halves of one character (an emoji). */
+function lineParts(line: string, size: number): string[] {
+  const parts: string[] = [];
+  let at = 0;
+  while (line.length - at > size) {
+    let end = at + size;
+    const code = line.charCodeAt(end);
+    if (code >= 0xdc00 && code <= 0xdfff) end -= 1;
+    parts.push(line.slice(at, end));
+    at = end;
+  }
+  parts.push(line.slice(at));
+  return parts;
 }

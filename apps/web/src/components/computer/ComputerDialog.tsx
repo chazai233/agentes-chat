@@ -16,11 +16,13 @@ import {
   liveSubLine,
   surfaceOf,
 } from "@agenteschat/client/lib/agent-computer";
+import { managesAgent } from "@agenteschat/client/lib/audience";
 import { computerName, READY_FLASH_MS, WORKSPACE_COMPUTER_KIND } from "@agenteschat/client/lib/computer";
 import { clockAt } from "@agenteschat/client/lib/format";
 import { agentGrammar } from "@agenteschat/client/lib/grammar";
 import { computerKind, isPaused } from "@agenteschat/client/lib/machines";
 import { can } from "@agenteschat/client/lib/permissions";
+import { isRightHand } from "@agenteschat/client/lib/right-hand";
 import { type Seat, screenId } from "@agenteschat/client/lib/seat";
 import { SeatContext, useSeat } from "@agenteschat/client/lib/seat-context";
 import { isPersonal } from "@agenteschat/client/lib/workspace-mode";
@@ -308,7 +310,7 @@ function ComputerStage({
   const dir = useDirectory(org.id);
   const actions = useBrowserHandoffMutations(org.id);
   const navigate = useNavigate();
-  const outages = useMachineOutages(org.id, can(org, "manage_agents"));
+  const outages = useMachineOutages(org.id, managesAgent(agent));
   const [switching, setSwitching] = useState(false);
   // The screen's own held cover says it all: no pause line over it.
   const [screenHeld, setScreenHeld] = useState(false);
@@ -323,7 +325,7 @@ function ComputerStage({
   const oneClick = useToolOneClick(machine);
   const browserOneClick = Boolean(machine && oneClick && oneClick.kind !== "outdated");
   const computer = computerName(t, org.name, machine, isPersonal(org));
-  const manages = can(org, "manage_agents") || agent.ownerUserId === me.user.id;
+  const manages = managesAgent(agent) || agent.ownerUserId === me.user.id;
   // Whose role gives no browser here gets Fechar, never "Assumir o navegador" (ADR 0085 §12).
   const mayBrowser = can(org, agent.ownerUserId === me.user.id ? "own_browsers" : "control_browsers");
   const person = (id: string | null) => (id ? dir.memberById.get(id)?.name : undefined) ?? t("channel.unknownPerson");
@@ -534,7 +536,7 @@ function ComputerStage({
           )}
         </>
       );
-  } else if ((!machine && f.edition === "cloud") || (machine?.standby && !machine.online)) {
+  } else if ((!machine && f.edition === "cloud") || machine?.standby) {
     // The workspace's computer is ready and this agent gets it at its first hello, or it wakes: a moment more.
     body = (
       <>
@@ -555,7 +557,9 @@ function ComputerStage({
             icon="computer"
             text={t("agentComputer.state.noComputer", g)}
             action={
-              manages && (
+              // The right hand's computer is the workspace's own, never chosen (the server refuses it).
+              manages &&
+              !isRightHand(agent) && (
                 <Button size="sm" variant="primary" onClick={choose}>
                   {t("agentComputer.choose")}
                 </Button>
@@ -656,9 +660,10 @@ function Banner({
 }
 
 /**
- * "Computador" in the agent's DM header: while turns wait for its computer, "Computador · 4 aguardando" opening the
- * line (with a way on to the computer for whoever may watch it), else, for whoever may watch it, the same dialog in
- * place, with a dot while the agent needs someone (amber) or works on it (its color). `queueOnly`: just that line.
+ * The computer in the agent's DM header: while turns wait for its computer, "Computador · 4 aguardando" opening the
+ * line (with a way on to the computer for whoever may watch it), else, for whoever may watch it, the computer's icon
+ * opening the same dialog in place, with a dot while the agent needs someone (amber) or works on it (its color).
+ * `queueOnly`: just that line.
  */
 export function ComputerButton({ agent, queueOnly }: { agent: Agent; queueOnly?: boolean }) {
   const view = useAgentComputer(agent);
@@ -710,16 +715,18 @@ function WatchButton({ agent, signal }: { agent: Agent; signal: EntrySignal }) {
   const openComputer = useOpenComputer();
   return (
     <Button
-      size="sm"
+      variant="ghost"
+      iconOnly
       icon="computer"
-      className="brw-dm"
+      className="channel__icon dm-computer"
+      aria-label={t("agentComputer.button")}
+      // Its state for screen readers off the keys' focus too; the kit's tip says name and state on hover and focus.
+      aria-description={signal.line}
+      title={signal.line ? `${t("agentComputer.button")}\n${signal.line}` : undefined}
       data-state={signal.state}
       style={signal.style}
       onClick={() => openComputer(agent.id)}
-    >
-      <span className="brw-dm__label">{t("agentComputer.button")}</span>
-      {signal.line && <span className="ac-visually-hidden">{signal.line}</span>}
-    </Button>
+    />
   );
 }
 

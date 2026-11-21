@@ -5,7 +5,7 @@ import { sniffModelImage } from "./avatars";
 import { readsOrMayJoin } from "./channels";
 import { cardPlace } from "./consultations";
 import { learnTrust, ownWords } from "./context/learn";
-import { changeSkillAsAgent } from "./context/learned-skills";
+import { changeSkillAsAgent, createSkillAsAgent } from "./context/learned-skills";
 import { memoryResult } from "./context/tools";
 import { publishMessageCreated } from "./events";
 import { copyToComputer, type StoredFile } from "./file-pulls";
@@ -26,10 +26,14 @@ import {
   type SkillDeps,
   skillFile,
   skillFilesOf,
+  skillHolders,
+  skillPersonMayChange,
 } from "./skills";
 import type { ToolContext, ToolDefinition, ToolOutput, ToolSource } from "./tools/types";
 
 export const OFFER_INSTALL_SKILL_TOOL = "offer_install_skill";
+/** A skill of the agent's own, made when a person asks (ADR 0120, addendum of 2026-11-14). */
+export const CREATE_SKILL_TOOL = "create_skill";
 export const UPDATE_SKILL_FROM_SOURCE_TOOL = "update_skill_from_source";
 /** An install card's `bodyCode` (`chat.body.action_install_skill`), and an update card's (`action_update_skills`). */
 export const INSTALL_SKILL_CARD = "action_install_skill";
@@ -73,6 +77,7 @@ async function notYours(ctx: ToolContext, name: string): Promise<ToolOutput> {
         eq(schema.skills.orgId, ctx.orgId),
         eq(schema.skills.slug, name.trim().toLowerCase()),
         isNull(schema.skills.deletedAt),
+        isNull(schema.skills.ownerUserId),
       ),
     );
   return {
@@ -84,6 +89,18 @@ async function notYours(ctx: ToolContext, name: string): Promise<ToolOutput> {
 }
 
 export const LOAD_SKILL_TOOL = "load_skill";
+
+/**
+ * A skill this run reads: one of the agent's own, else one the person behind the run may change (`managed`), so the
+ * agent reads and fixes other agents' skills for who manages them.
+ */
+async function skillToRead(ctx: ToolContext, name: string) {
+  const mine = await agentSkillByName(ctx.db, ctx.orgId, ctx.agentId, name, ctx.runId);
+  if (mine) return { skill: mine, managed: false };
+  const person = await personBehindCall(ctx);
+  const skill = person ? await skillPersonMayChange(ctx.db, ctx.orgId, name, person) : null;
+  return skill ? { skill, managed: true } : null;
+}
 
 /** The files `load_skill` names one by one: the list goes into the conversation of every run that loads the skill. */
 const LISTED_FILES = 100;
@@ -155,7 +172,7 @@ export function createSkillToolSource(
     {
       name: LOAD_SKILL_TOOL,
       description:
-        "Load one of your skills (from 'Available skills') before doing a task it covers: returns its instructions and the files you can read.",
+        "Load one of your skills (from 'Available skills') before doing a task it covers: returns its instructions and the files you can read. When the person who asked manages skills, it also reads any skill of the workspace, to change it or give it to agents.",
       scope: "skills:read",
       inputSchema: {
         type: "object",
@@ -165,14 +182,23 @@ export function createSkillToolSource(
       },
       async execute(input, ctx) {
         try {
-          const skill = await agentSkillByName(ctx.db, ctx.orgId, ctx.agentId, str(input.name));
-          if (!skill) return notYours(ctx, str(input.name));
+          const found = await skillToRead(ctx, str(input.name));
+          if (!found) return notYours(ctx, str(input.name));
+          const { skill } = found;
+          const list = skillFileList(await skillFilesOf(ctx.db, skill));
+          if (found.managed) {
+            const holders = await skillHolders(ctx.db, ctx.orgId, skill.id);
+            const on = holders.length ? holders.map((h) => `@${h}`).join(", ") : "no agent";
+            return {
+              content: `Skill "${skill.name}" (v${skill.version}) is not on for you: you read it to manage it for the person who asked, never to follow it yourself (to use it yourself, ${ASK_FOR_SKILL.slice(0, -1)}). On for: ${on}. Change it with update_skill; give it to agents or take it away with propose_settings_change (add_skills, remove_skills).\n\n${skill.body}\n\nFiles (read with read_skill_file):\n${list}`,
+              data: { skill: { id: skill.id, name: skill.name, version: skill.version } },
+            };
+          }
           // Use keeps an agent-made skill from being archived for disuse (ADR 0120).
           await ctx.db
             .update(schema.skills)
             .set({ useCount: sql`${schema.skills.useCount} + 1`, lastUsedAt: new Date() })
             .where(eq(schema.skills.id, skill.id));
-          const list = skillFileList(await skillFilesOf(ctx.db, skill));
           return {
             content: `Skill "${skill.name}" (v${skill.version}) loaded.\n\n${skill.body}\n\nFiles (read with read_skill_file):\n${list}`,
             data: { skill: { id: skill.id, name: skill.name, version: skill.version } },
@@ -198,7 +224,7 @@ export function createSkillToolSource(
       },
       async execute(input, ctx) {
         try {
-          const skill = await agentSkillByName(ctx.db, ctx.orgId, ctx.agentId, str(input.name));
+          const skill = (await skillToRead(ctx, str(input.name)))?.skill;
           if (!skill) return notYours(ctx, str(input.name));
           const path = str(input.path);
           if (path.endsWith("/")) {
@@ -249,7 +275,7 @@ export function createSkillToolSource(
     {
       name: "update_skill",
       description:
-        "Fix a skill you loaded this turn: `body` its new body, `files` whole text files to change or add (read them first). Files that run wait for a person. No credentials.",
+        "Fix a skill you loaded this turn: `body` its new body, `files` whole text files to change or add (read them first). Also another agent's skill, when the person who asked manages skills: load it first. Files that run wait for a person. No credentials.",
       scope: "skills:read",
       inputSchema: {
         type: "object",
@@ -296,7 +322,7 @@ export function createSkillToolSource(
             str(input.name),
             { body: typeof input.body === "string" ? input.body : undefined, files },
             trust,
-            { person, decides },
+            { person, decides, words },
           );
           const waits = change.scripts.length
             ? ` ${change.scripts.join(", ")} run${change.scripts.length === 1 ? "s" : ""} as code, so that change waits for a person who manages agents (a proposal).`
@@ -330,6 +356,56 @@ export function createSkillToolSource(
           return carded(
             `${why} (${change.proposalIds.join(", ")}): someone who manages agents accepts it on the card under your reply.${waits} Use your fix in this turn.`,
           );
+        } catch (error) {
+          return failed(error);
+        }
+      },
+    },
+    {
+      name: CREATE_SKILL_TOOL,
+      description:
+        "Create a skill of your own when a person asks you to make one ('transforma isso numa skill', 'make a skill of how you did this'): `name` kebab-case for the kind of task, `description` when to use it, `body` Markdown with the steps first, then the pitfalls, in the person's language. It goes on for you at once and shows in the workspace's Skills, where people undo it or give it to other agents. This is the way to make a skill here: never a repository, a link or your CLI's own skills folder. No credentials or where they are kept: say which key it needs from a person. Add text files to it later with update_skill.",
+      scope: "skills:read",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", minLength: 1, maxLength: 64, pattern: "^[a-z0-9]+(-[a-z0-9]+)*$" },
+          description: { type: "string", minLength: 1, maxLength: 1024 },
+          body: { type: "string", minLength: 1, maxLength: 50_000 },
+        },
+        required: ["name", "description", "body"],
+        additionalProperties: false,
+      },
+      describe: (input) => ({ title: `Create the skill ${str(input.name)}` }),
+      async execute(input, ctx) {
+        try {
+          const { trust, person } = await learnTrust(ctx);
+          if (!person) {
+            return {
+              content:
+                "Only a person's request makes a skill. Save how you did it with save_how_to: used again and again, it becomes a skill by itself.",
+              isError: true,
+            };
+          }
+          if (trust === "low") {
+            return {
+              content:
+                "This turn read outside content (the web, mail or a connected app), so it can't make a skill: a skill loads as trusted instructions. Show the person the skill's text so they add it in Settings › Skills, or ask them to ask again in a new message.",
+              isError: true,
+            };
+          }
+          const skill = await createSkillAsAgent({ db: ctx.db, judge: deps.judge }, ctx, {
+            name: str(input.name),
+            description: str(input.description),
+            body: str(input.body),
+            person,
+          });
+          return {
+            content: skill.ownerUserId
+              ? `Created the skill ${skill.name}, the personal skill of the person who asked: you use it only when they ask. It shows in their Skills under Personal, where they undo it. Load it with load_skill when a task matches.`
+              : `Created the skill ${skill.name}, on for you now. It shows in your skills and in Settings › Skills, where people undo it or give it to other agents. Load it with load_skill when a task matches.`,
+            data: { skill: { id: skill.id, name: skill.name, version: skill.version } },
+          };
         } catch (error) {
           return failed(error);
         }
@@ -381,10 +457,11 @@ export function createSkillToolSource(
                 eq(schema.skills.orgId, ctx.orgId),
                 eq(schema.skills.sourceUrl, url),
                 isNull(schema.skills.deletedAt),
+                isNull(schema.skills.ownerUserId),
               ),
             );
           if (installed) {
-            const on = await agentSkillByName(ctx.db, ctx.orgId, ctx.agentId, installed.name);
+            const on = await agentSkillByName(ctx.db, ctx.orgId, ctx.agentId, installed.name, ctx.runId);
             return {
               content: `That link is already installed as the skill ${installed.name}, ${on ? "on for you. To bring it up to date, use update_skill_from_source." : `not on for you: ${ASK_FOR_SKILL}`}`,
               isError: true,
@@ -451,6 +528,7 @@ export function createSkillToolSource(
               and(
                 eq(schema.skills.orgId, ctx.orgId),
                 isNull(schema.skills.deletedAt),
+                isNull(schema.skills.ownerUserId),
                 isNotNull(schema.skills.sourceUrl),
                 all ? undefined : eq(schema.skills.slug, name),
               ),

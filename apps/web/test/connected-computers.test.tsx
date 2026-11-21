@@ -213,6 +213,26 @@ describe("uploaded files in the Drive", () => {
     expect(dialog.querySelector("textarea")).toBeNull();
   });
 
+  test("a Markdown file reads as a document and a code file in a code card", async () => {
+    const api = createFakeApi(seedState());
+    const md = await api.artifacts.upload(
+      ORG_ID,
+      new File(["# Plano\n\nUm **passo** por vez"], "plano.md", { type: "text/markdown" }),
+    );
+    const ts = await api.artifacts.upload(ORG_ID, new File(["const total = 1;"], "soma.ts", { type: "text/plain" }));
+    await renderApp(`/org/${ORG_ID}/drive?artifact=${md.id}`, { api });
+    await settle(8);
+    let dialog = screen().getByRole("dialog", { name: "plano.md" });
+    expect(dialog.querySelector(".file-view__doc strong")?.textContent).toBe("passo");
+    expect(dialog.querySelector(".file-view__text")).toBeNull();
+    cleanup();
+    await renderApp(`/org/${ORG_ID}/drive?artifact=${ts.id}`, { api });
+    await settle(8);
+    dialog = screen().getByRole("dialog", { name: "soma.ts" });
+    expect(dialog.querySelector(".code-card .code-card__code")?.textContent).toBe("const total = 1;");
+    expect(dialog.querySelector(".file-view__text")).toBeNull();
+  });
+
   test("a JSON file reads formatted in a code card, the text as written one press away", async () => {
     const api = createFakeApi(seedState());
     const raw = '{"status":"ok","checks":[{"id":"db","ms":12}]}';
@@ -739,7 +759,7 @@ describe("the computer page: pause, folders and tools (ADR 0036)", () => {
     // "Pausado", "até 16:24" (past midnight the date comes first: "até 10 nov 00:08").
     const sameDay = new Date(until).toDateString() === new Date().toDateString();
     const line = head.querySelector(".dv-statusline")?.textContent ?? "";
-    expect(line).toContain("Pausado");
+    expect(head.querySelector(".dv-headchips")?.textContent).toContain("Pausado");
     expect(line).toContain(sameDay ? `até ${time}` : "até ");
     expect(line).toContain(time);
     expect(head.textContent).toContain("Pausado no próprio computador por quem o conectou.");
@@ -849,16 +869,15 @@ describe("the computer page: pause, folders and tools (ADR 0036)", () => {
     );
   });
 
-  test("the browser off: whoever is at the computer turns it on in the app, or on Linux with the command", async () => {
+  test("the browser off on an app too old to switch from here: update it there, on Linux the command too", async () => {
     const card = () => document.querySelector('[aria-labelledby="sec-machine-browser"]') as HTMLElement;
     await open();
-    expect(card().textContent).toContain(
-      "Quem conectou o computador liga aqui ou no app do agentes.chat nele: Preferências → Ferramentas.",
-    );
+    expect(card().textContent).toMatch(/Atualize o app do agentes\.chat no .+ para ligar daqui\./);
+    expect(card().textContent).not.toContain("Preferências");
     expect(card().querySelector(".machine-command__code")).toBeNull();
     cleanup();
     await open({ os: "linux", name: "Servidor", mode: "system" });
-    expect(card().textContent).toContain("Sem o app? No terminal do computador:");
+    expect(card().textContent).toContain("Prefiro no Terminal");
     expect(card().querySelector(".machine-command__code")?.textContent).toBe(
       "sudo agentes-runner tools enable browser",
     );
@@ -873,7 +892,6 @@ describe("the computer page: pause, folders and tools (ADR 0036)", () => {
       accessAllow: true,
       access: { folders: [], tools: { claude: true, codex: false, commands: true, browser: false } },
     });
-    expect(card().textContent).toContain("O navegador está desligado nesse computador.");
     await click(within(card()).getByRole("button", { name: "Ligar o navegador" }));
     await settle(4);
     expect(allowCalls(mine.state)).toEqual([[ORG_ID, mine.m.id, "browser"]]);
@@ -883,15 +901,23 @@ describe("the computer page: pause, folders and tools (ADR 0036)", () => {
     expect(allowCalls(mine.state).at(-1)).toEqual([ORG_ID, mine.m.id, "codex"]);
     cleanup();
     const theirs = await open({ pairedBy: { id: "u-rui", name: "Rui Tanaka" }, accessAllow: true });
-    expect(card().textContent).toContain("O navegador está desligado no computador de Rui.");
+    expect(within(card()).queryByRole("button", { name: "Ligar o navegador" })).toBeNull();
     await click(within(card()).getByRole("button", { name: "Pedir a Rui" }));
     expect(theirs.state.calls.filter((c) => c.method === "machines.askTool").map((c) => c.args)).toEqual([
       [ORG_ID, theirs.m.id, "browser"],
     ]);
-    // An app too old for it keeps the steps on the computer.
+    // Offline: the button waits for it, and one line says so.
+    cleanup();
+    await open({ pairedBy: { id: "u-walter", name: "Walter White" }, accessAllow: true, online: false });
+    expect(card().textContent).toContain("está offline. Assim que ele voltar, o botão liga o navegador.");
+    expect((within(card()).getByRole("button", { name: "Ligar o navegador" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    // An app too old for it: update it there.
     cleanup();
     await open({ pairedBy: { id: "u-walter", name: "Walter White" }, accessAllow: false });
     expect(within(card()).queryByRole("button", { name: "Ligar o navegador" })).toBeNull();
+    expect(card().textContent).toContain("para ligar daqui.");
   });
 
   test("to allow more: the app on a Mac or a PC, the computer's terminal on Linux", async () => {

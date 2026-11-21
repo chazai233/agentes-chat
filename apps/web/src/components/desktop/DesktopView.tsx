@@ -24,8 +24,9 @@ import { useDirectory } from "@/hooks/useDirectory";
 import { matchesNow, TOUCH, useMatchMedia } from "@/hooks/useMatchMedia";
 import { heldPicture, holdImage, holdPicture, liveCanvas, pictureOf, showsPicture } from "@/lib/canvas";
 import { useSaid } from "@/lib/toast";
-import { SocketFactoryContext } from "@/realtime/context";
+import { SocketFactoryContext, useDesktopPointer } from "@/realtime/context";
 import { withAgentFace } from "../AgentAvatar";
+import { AgentCursor } from "../browser/AgentCursor";
 import { Cover } from "../browser/Cover";
 import { AskActions, HandBackFoot, useAskControl } from "../computer/control";
 import { CantShowCover, ScreenNotice } from "../computer/covers";
@@ -119,6 +120,7 @@ export function DesktopView({
   const g = agentGrammar(name);
   const color = colorOf(dir.agentById.get(agentId));
   const [view, setView] = useState<DesktopViewState>("connecting");
+  const pointer = useDesktopPointer(agentId);
   const [round, setRound] = useState(0);
   const [gaveUp, setGaveUp] = useState(false);
   // Control opening over the last picture it watched, or watching again over the last one in control.
@@ -291,8 +293,6 @@ export function DesktopView({
           setScreenMode(m);
           const next = new Rfb(el, opened.channel(), { shared: true });
           next.viewOnly = !control;
-          // In control, a screen that draws no pointer of its own shows noVNC's dot, never none (watching, desktop.css).
-          next.showDotCursor = control;
           const encoding = desktopEncoding(control, network);
           next.qualityLevel = encoding.quality;
           next.compressionLevel = encoding.compression;
@@ -581,6 +581,7 @@ export function DesktopView({
     <div
       className={cx("dsk", preview && "dsk--card", inControl && "is-control", final && "is-final")}
       data-state={shown}
+      data-control={inControl || undefined}
     >
       {!preview && (
         <DialogHead
@@ -608,7 +609,12 @@ export function DesktopView({
           className={inControl ? "dsk-screen is-control" : "dsk-screen"}
           role="img"
           aria-label={t("agentComputer.screen", g)}
-        />
+        >
+          {/* Watching the agent work: its cursor shows where it goes (noVNC's picture has no pointer in it). */}
+          {!inControl && view === "live" && (
+            <AgentCursor agentId={agentId} name={name} color={color} pointer={pointer} />
+          )}
+        </div>
         {inControl && (
           <textarea
             ref={keysRef}

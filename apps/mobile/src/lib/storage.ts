@@ -50,6 +50,10 @@ export const STORED = {
   pushAsked: "push-asked",
   /** The person turned notifications off in the app (no silent re-registration). */
   pushOff: "push-off",
+  /** "0": the agents' Live Activity is off on this phone (Você › Notificações, ADR 0210); on by default. */
+  liveActivityOff: "live-activity-off",
+  /** This install's id for the Live Activity's registration (`POST /api/app/push/live-activity`). */
+  liveActivityInstall: "live-activity-install",
   /** How many times our notifications sheet opened by itself (@agenteschat/client/lib/push-offer). */
   pushOffers: "push-offers",
   /** The wiki pages last opened on this phone, per workspace (JSON: org id → slugs, newest first). */
@@ -86,6 +90,8 @@ export const STORED = {
   doubleTapTaught: "double-tap-taught",
   /** `<user id>.<org id>` entries (JSON list): the right hand's DM was opened there, so its "Novo" is gone. */
   rightHandSeen: "right-hand-seen",
+  /** The speed voice messages play at on this phone: "1", "1.5" or "2" (features/voice/speed.ts). */
+  voiceSpeed: "voice-speed",
   /** The person held the send button to stop an agent and send once: the composer's hint is over ("1"). */
   stopSendTaught: "stop-send-taught",
 } as const;

@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { z } from "zod";
 import { parseFirebaseServiceAccount, parsePemKey } from "./pem";
 
@@ -32,6 +33,7 @@ export interface EnvVarDefinition {
     | "Email for agents"
     | "Push"
     | "Operator"
+    | "Chat surfaces"
     | "Usage report"
     | "Observability";
   /** Example value for docs. Never a real secret. */
@@ -49,8 +51,43 @@ const HOST_NAME = "[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-
 const HOST_SECRET = `${HOST_NAME}=[^\\s,]{32,}`;
 const HOST_SECRETS = new RegExp(`^${HOST_SECRET}(?:,${HOST_SECRET})*$`);
 
+/** Whether `value` is a web origin alone (http or https, host and port), the form a browser sends in `Origin`. */
+function isOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:") && url.origin === value;
+  } catch {
+    return false;
+  }
+}
+
 /** Claude model ids accepted as defaults. Prices live in `@agenteschat/providers` (`MODEL_CATALOG`). */
 const modelId = z.string().regex(/^[a-z0-9][a-z0-9.-]*$/, "must be a model id such as claude-sonnet-5-5");
+
+/** A comma-separated list, trimmed and normalized, empty entries dropped; each entry checked by `ok`. */
+const commaList = (ok: (entry: string) => boolean, message: string, normalize = (entry: string) => entry) =>
+  z
+    .string()
+    .optional()
+    .transform((value) =>
+      (value ?? "")
+        .split(",")
+        .map((entry) => normalize(entry.trim()))
+        .filter(Boolean),
+    )
+    .refine((entries) => entries.every(ok), message);
+
+const HOST_LABELS = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+/** A host name, or `*.` and a suffix of two labels or more (never a whole top-level domain). */
+const allowedHost = (entry: string) =>
+  !isIP(entry) && HOST_LABELS.test(entry.startsWith("*.") ? entry.slice(2) : entry);
+/** An IPv4 or IPv6 address, alone or with a prefix length in range. */
+const allowedRange = (entry: string) => {
+  const [address = "", bits, ...rest] = entry.split("/");
+  const family = isIP(address);
+  if (!family || rest.length > 0) return false;
+  return bits === undefined || (/^\d{1,3}$/.test(bits) && Number(bits) <= (family === 6 ? 128 : 32));
+};
 
 export const envVars = {
   NODE_ENV: {
@@ -75,6 +112,30 @@ export const envVars = {
       "Public base URL of this instance, without a trailing slash. Used for sign-in callbacks, invitation links and the allowed browser origin.",
     section: "Server",
     example: "https://chat.example.com",
+  },
+  EXTRA_TRUSTED_ORIGINS: {
+    schema: z
+      .string()
+      .optional()
+      .transform((value) =>
+        value
+          ?.split(",")
+          .map((entry) => entry.trim().replace(/\/+$/, ""))
+          .filter(Boolean),
+      )
+      .pipe(
+        z
+          .array(
+            z
+              .string()
+              .refine(isOrigin, "must be an http or https origin such as https://chat.example.com, with no path"),
+          )
+          .optional(),
+      ),
+    description:
+      "Other origins this instance is opened at, comma-separated (`http://192.168.0.10:3000`, `https://agentes.tail1234.ts.net`). `PUBLIC_URL` is always trusted; these are too, for sign-in and for saving from those addresses (the sign-in origin check, the app's writes and its WebSockets). Each is http or https, host and port, with no path; a trailing slash is dropped. Unset (default): `PUBLIC_URL` only.",
+    section: "Server",
+    example: "http://192.168.0.10:3000,https://agentes.tail1234.ts.net",
   },
   LANDING_URL: {
     schema: z.url().optional(),
@@ -340,7 +401,7 @@ export const envVars = {
   TYPESAFE_API_KEY: {
     schema: z.string().optional(),
     description:
-      "Your TypeSafe key for Jev (https://console.typesafe.ai/keys), optional. Jev picks who answers messages nobody @mentioned, keeps memory tidy and finds what agents look for on their screens. The installation's owner can also add it in Settings › AI accounts. This variable wins over that one. Never sent to a browser. Calls are billed to your TypeSafe account.",
+      "Your TypeSafe key for Jev (https://console.typesafe.ai/keys), optional. Jev picks who answers messages nobody @mentioned, keeps memory tidy and finds what agents look for on their screens. An OpenRouter key (sk-or-…) works too: the same Jev, called and billed through OpenRouter. The installation's owner can also add one in Settings › AI accounts. This variable wins over that one. Never sent to a browser. Calls are billed to the key's account.",
     section: "Agents",
     secret: true,
   },
@@ -358,6 +419,28 @@ export const envVars = {
     description:
       "Jev model for judgments over images (an agent finding a target on a screenshot of its browser or desktop). Needs a release that takes images.",
     section: "Agents",
+  },
+  SCREEN_JUDGMENTS: {
+    schema: z.enum(["full", "small", "shadow"]).default("full"),
+    description:
+      "What an agent's screen checks and finds send the judge. `full` (default): the whole page, up to 60k characters. `small`: what matters of a long page (its top, what changed, the lines with the check's words), and no judgment when the quoted words a check names are on the screen. `shadow`: both at once; `full` decides, `small` is only compared, and each judgment writes a `screen judgment shadow` log line (a warning when they disagree) with both decisions and sizes, never the page's text. `shadow` asks the judge twice. Applies to `SCREEN_JUDGMENTS_ORGS`.",
+    section: "Agents",
+  },
+  SCREEN_JUDGMENTS_ORGS: {
+    schema: z
+      .string()
+      .optional()
+      .transform((value) =>
+        value
+          ?.split(",")
+          .map((entry) => entry.trim())
+          .filter(Boolean),
+      )
+      .pipe(z.array(z.uuid()).optional()),
+    description:
+      "The organization ids (separated by commas) that get `SCREEN_JUDGMENTS`; every other organization gets `full`. Unset (default): every organization gets it.",
+    section: "Agents",
+    example: "00000000-0000-4000-8000-000000000000",
   },
   OPENAI_CHEAP_MODEL: {
     schema: modelId.default("gpt-6-luna"),
@@ -379,6 +462,12 @@ export const envVars = {
   AGENT_MAX_OUTPUT_TOKENS: {
     schema: z.coerce.number().int().min(256).max(128_000).default(16_000),
     description: "Upper bound on tokens an agent may generate in one reply.",
+    section: "Agents",
+  },
+  CLAUDE_PLAN_CONCURRENCY: {
+    schema: z.coerce.number().int().min(0).max(50).default(6),
+    description:
+      "How many agent runs one Claude plan sign-in (a subscription, never an API key) works on at once. Past it, the next run waits in line like any other and starts as soon as one ends. 0 turns the limit off.",
     section: "Agents",
   },
   AGENT_MAX_TOOL_TURNS: {
@@ -417,11 +506,50 @@ export const envVars = {
       "Workspace id for the platform key, when the key is not scoped to a workspace (sent as `anthropic-workspace-id`).",
     section: "Agents",
   },
+  PLATFORM_OPENAI_API_KEY: {
+    schema: z.string().optional(),
+    description:
+      "The server's own OpenAI API key. Workspaces without an OpenAI key of their own use it to generate images on canvases (GPT Image, ADR 0197) and for agents on OpenAI models. Usage is still recorded per organization.",
+    section: "Agents",
+    secret: true,
+  },
+  PLATFORM_GEMINI_API_KEY: {
+    schema: z.string().optional(),
+    description:
+      "The server's own Gemini API key. Workspaces without a Gemini key of their own use it to generate images on canvases (Nano Banana, ADR 0197) and for agents on Gemini models. Usage is still recorded per organization.",
+    section: "Agents",
+    secret: true,
+  },
+  PLATFORM_OPENROUTER_API_KEY: {
+    schema: z.string().optional(),
+    description:
+      "The server's own OpenRouter API key. Workspaces without an OpenRouter key of their own use it to generate images on canvases (ADR 0197) and for agents on OpenRouter models. Usage is still recorded per organization.",
+    section: "Agents",
+    secret: true,
+  },
   MODEL_ENDPOINTS_PRIVATE: {
     schema: z.stringbool().optional(),
     description:
-      "Whether a workspace's own model endpoint (Settings › AI keys › Other provider) may be on this server's network or over http: an Ollama, vLLM, LM Studio or LiteLLM next to it. The same switch covers the other addresses a workspace names: custom MCP servers and their sign-in, its own bucket, server icons and the pages agents read. Unset: allowed, except on agentes.chat Cloud (https://app.agentes.chat) and with `ALLOW_SIGNUP=true`, where only public https addresses are, checked again at every connection.",
+      "Whether a workspace's own model endpoint (Settings › AI keys › Other provider) may be on this server's network or over http: an Ollama, vLLM, LM Studio or LiteLLM next to it. The other addresses a workspace names (custom MCP servers and their sign-in, its own bucket, server icons, the pages agents read) reach a private network only through `OUTBOUND_ALLOW_CIDRS` or `OUTBOUND_ALLOW_HOSTS`. Unset: allowed, except on agentes.chat Cloud (https://app.agentes.chat) and with `ALLOW_SIGNUP=true`, where only public https addresses are, checked again at every connection.",
     section: "Agents",
+  },
+  OUTBOUND_ALLOW_HOSTS: {
+    schema: commaList(
+      allowedHost,
+      "must be host names or *.suffixes such as *.tail1234.ts.net, comma-separated",
+      (host) => host.toLowerCase(),
+    ),
+    description:
+      "Comma-separated host names, or `*.` suffixes, that addresses a workspace types (custom MCP servers and their sign-in, its own bucket, a database, a mail server, a password manager, the pages its agents read) may reach on a private network, such as a Tailscale tailnet or a LAN, whatever they resolve to, checked again at every connection. Loopback and cloud metadata addresses stay refused, and agentes.chat Cloud ignores it. Name a narrow suffix: everyone who can make a name under it can point it at your network. Unset: none.",
+    section: "Security",
+    example: "*.tail1234.ts.net,nas.example.com",
+  },
+  OUTBOUND_ALLOW_CIDRS: {
+    schema: commaList(allowedRange, "must be IP addresses or CIDR ranges such as 100.64.0.0/10, comma-separated"),
+    description:
+      "Comma-separated IP ranges (CIDR) or addresses that addresses a workspace types may reach, as with `OUTBOUND_ALLOW_HOSTS`: Tailscale's are `100.64.0.0/10` and `fd7a:115c:a1e0::/48`. Loopback, link-local and cloud metadata addresses stay refused even inside a range, and agentes.chat Cloud ignores it. Unset: none.",
+    section: "Security",
+    example: "100.64.0.0/10,fd7a:115c:a1e0::/48",
   },
   SUMMARY_MODEL: {
     schema: modelId.default("claude-haiku-5-5"),
@@ -833,13 +961,6 @@ export const envVars = {
     description: "Email approvers a digest of requests still waiting after this many hours (requests expire at 24 h).",
     section: "Email",
   },
-  EXPO_ACCESS_TOKEN: {
-    schema: z.string().optional(),
-    description:
-      "Expo access token for push notifications to the iPhone app (only needed when “enhanced push security” is on in the Expo project). iPhone pushes are sent through the Expo Push API either way; Android pushes don't use Expo (`PUSH_SENDER`).",
-    section: "Push",
-    secret: true,
-  },
   FIREBASE_SERVICE_ACCOUNT: {
     schema: z
       .string()
@@ -858,10 +979,68 @@ export const envVars = {
     section: "Push",
     secret: true,
   },
+  APNS_KEY: {
+    schema: z
+      .string()
+      .optional()
+      .transform((value, ctx) => {
+        if (value === undefined) return value;
+        try {
+          const pem = parsePemKey(value);
+          if (!pem.includes("BEGIN PRIVATE KEY")) throw new Error("must be the .p8 key (-----BEGIN PRIVATE KEY-----)");
+          return pem;
+        } catch (error) {
+          ctx.addIssue({ code: "custom", message: (error as Error).message });
+          return z.NEVER;
+        }
+      }),
+    description:
+      "iPhone pushes straight to Apple (APNs): an APNs auth key (the .p8 file from the Apple Developer account › Keys, with the Apple Push Notifications service on) as PEM, PEM with `\\n` for newlines, or base64 of the file. Set it with `APNS_KEY_ID` and `APNS_TEAM_ID`. Only for a server that sends to an iPhone app signed by its own Apple team (`PUSH_SENDER`) or runs the push relay (`PUSH_RELAY_SERVE`); the app from the App Store is reached through the relay.",
+    section: "Push",
+    secret: true,
+  },
+  APNS_KEY_ID: {
+    schema: z
+      .string()
+      .regex(/^[A-Z0-9]{10}$/, "must be the 10-character id of the APNs key")
+      .optional(),
+    description: "The id of `APNS_KEY` (10 characters, shown beside the key in the Apple Developer account).",
+    section: "Push",
+    example: "ABC123DEFG",
+  },
+  APNS_TEAM_ID: {
+    schema: z
+      .string()
+      .regex(/^[A-Z0-9]{10}$/, "must be the 10-character Apple team id")
+      .optional(),
+    description: "The Apple Developer team that owns `APNS_KEY` and the iPhone app (10 characters).",
+    section: "Push",
+    example: "XYZ987WVUT",
+  },
+  APNS_APP_IDS: {
+    schema: z
+      .string()
+      .default("chat.agentes.app,chat.agentes.app.preview,chat.agentes.app.development")
+      .transform((value, ctx) => {
+        const ids = value
+          .split(",")
+          .map((id) => id.trim())
+          .filter(Boolean);
+        const bad = ids.find((id) => !/^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+){1,10}$/.test(id) || id.length > 155);
+        if (ids.length === 0 || bad !== undefined) {
+          ctx.addIssue({ code: "custom", message: `must be bundle ids separated by commas${bad ? ` (${bad})` : ""}` });
+          return z.NEVER;
+        }
+        return ids;
+      }),
+    description:
+      "The iPhone apps (bundle ids, separated by commas) this server pushes to with `APNS_KEY`; a push for any other is refused, since one key signs for every app of its team. The first is used for a phone that didn't say which app it runs.",
+    section: "Push",
+  },
   PUSH_SENDER: {
     schema: z.enum(["auto", "direct", "relay", "off"]).default("auto"),
     description:
-      "How Android pushes are sent (iPhones go through Expo for now). `auto` (default): straight to Firebase when `FIREBASE_SERVICE_ACCOUNT` is set, else through the push relay. `relay`: through the agentes.chat push relay (`PUSH_RELAY_URL`), which is what lets the Android app from the stores get this server's pushes; the server registers itself there on its first push, no account needed, and each push's text passes through it. `direct`: straight to Firebase with `FIREBASE_SERVICE_ACCOUNT`, for an Android app built with your own Firebase project. `off`: no Android pushes.",
+      "How pushes to the phone app are sent, each platform on its own. `auto` (default): Android straight to Firebase when `FIREBASE_SERVICE_ACCOUNT` is set and iPhones straight to Apple when `APNS_KEY` is, else through the push relay (the server that is the relay itself sends none for a platform without its credentials). `relay`: through the agentes.chat push relay (`PUSH_RELAY_URL`), which is what lets the app from the stores get this server's pushes; the server registers itself there on its first push, no account needed, and each push's text passes through it. `direct`: straight to Firebase with `FIREBASE_SERVICE_ACCOUNT` and to Apple with `APNS_KEY`, for an app built with your own Firebase project and Apple team. `off`: no phone pushes.",
     section: "Push",
   },
   PUSH_RELAY_URL: {
@@ -869,7 +1048,8 @@ export const envVars = {
       .url()
       .refine((u) => u.startsWith("https://"), "must be an https URL")
       .default("https://app.agentes.chat/api/push-relay/v1"),
-    description: "The push relay Android pushes go through with `PUSH_SENDER=relay` (or `auto` without Firebase).",
+    description:
+      "The push relay phone pushes go through with `PUSH_SENDER=relay` (or `auto` without the platform's own credentials).",
     section: "Push",
   },
   PUSH_RELAY_SERVE: {
@@ -878,7 +1058,7 @@ export const envVars = {
       .transform((on) => (on ? "on" : "off") as "on" | "off")
       .default("off"),
     description:
-      "Runs the push relay at `/api/push-relay/v1` for other installations' Android pushes, sent with this server's `FIREBASE_SERVICE_ACCOUNT` (agentes.chat's own servers). `on` without the service account serves nothing.",
+      "Runs the push relay at `/api/push-relay/v1` for other installations' phone pushes, sent with this server's `FIREBASE_SERVICE_ACCOUNT` (Android) and `APNS_KEY` (iPhone): agentes.chat's own servers. `on` with neither serves nothing.",
     section: "Push",
   },
   WEB_PUSH: {
@@ -1002,11 +1182,66 @@ export const envVars = {
     example: "<output of openssl rand -base64 48>",
     secret: true,
   },
+  OPERATOR_API_REVEAL_TOKEN: {
+    schema: z
+      .string()
+      .min(32, "must be at least 32 characters. Generate one with `openssl rand -base64 48`")
+      .optional(),
+    description:
+      "A third token for the operator API, for the one thing the other two never do: read a single piece of what a workspace wrote (a message, a step of a run, an agent's instructions), one at a time, with a stated reason, for a member who asked for help or to diagnose a run that failed or got stuck (`POST /reveal/...`, ADR 0056). Every such read is recorded first and shows in that workspace's audit log. Leave it unset unless a tool of yours needs it: setting it makes you a reader of your workspaces' content, which you must tell them, and makes the server keep what members write in the feedback form for 90 days. Needs `OPERATOR_API_TOKEN` and must differ from it and from `OPERATOR_API_READ_TOKEN`. Unset (default): every path under `/reveal` answers 403 and none of those words are kept. Generate with `openssl rand -base64 48`.",
+    section: "Operator",
+    example: "<output of openssl rand -base64 48>",
+    secret: true,
+  },
   OPERATOR_API_PORT: {
     schema: z.coerce.number().int().min(1).max(65535).default(3001),
     description:
-      "Port of the operator API's listener, on the same `HOST`; only with `OPERATOR_API_TOKEN`. The compose file doesn't publish it: containers on the same Docker network reach it as `agentes:3001`.",
+      "Port of the operator API's listener, on the same `HOST`; only with `OPERATOR_API_TOKEN` or `SURFACE_BRIDGE_TOKEN`. The compose file doesn't publish it: containers on the same Docker network reach it as `agentes:3001`.",
     section: "Operator",
+  },
+  SURFACE_BRIDGE_TOKEN: {
+    schema: z
+      .string()
+      .min(32, "must be at least 32 characters. Generate one with `openssl rand -base64 48`")
+      .optional(),
+    description:
+      "Turns on the bridge for an outside chat surface (ADR 0187): `/api/surface/v1` on the operator API's listener (`OPERATOR_API_PORT`), called with this value as `Authorization: Bearer` by a separate service of yours that carries people's messages between a chat app and their DM with the workspace's assistant. It can post as any linked person into that DM and read every reply sent to linked people, so never publish that port or put it behind your reverse proxy. It opens nothing under `/api/operator/v1`, and the operator tokens don't open the bridge. Needs `SURFACE_NAME` and `SURFACE_OPEN_URL`, and must differ from every operator token. Unset (default): no bridge, nothing recorded, no row in the apps. Generate with `openssl rand -base64 48`.",
+    section: "Chat surfaces",
+    example: "<output of openssl rand -base64 48>",
+    secret: true,
+  },
+  SURFACE_NAME: {
+    schema: z.string().trim().min(1).max(32).optional(),
+    description:
+      "The chat surface's name as people and the assistant read it, in settings and in the assistant's instructions. Only with `SURFACE_BRIDGE_TOKEN`. Its lower-cased form is what stored links are keyed by: changing it (even its capitals) ends every link, silently.",
+    section: "Chat surfaces",
+    example: "Example Chat",
+  },
+  SURFACE_OPEN_URL: {
+    schema: z
+      .url({ protocol: /^https$/ })
+      .refine((url) => url.split("{text}").length === 2, "must hold {text} once")
+      .optional(),
+    description:
+      "An `https://` address that opens a chat with the surface's account with a text already typed: `{text}` (once) is replaced by the linking code. Only with `SURFACE_BRIDGE_TOKEN`.",
+    section: "Chat surfaces",
+    example: "https://chat.example.com/open?text={text}",
+  },
+  SURFACE_ONLY: {
+    schema: z
+      .string()
+      .optional()
+      .transform((value) =>
+        value
+          ?.split(",")
+          .map((entry) => entry.trim().toLowerCase())
+          .filter(Boolean),
+      )
+      .pipe(z.array(z.email()).optional()),
+    description:
+      "While you try the surface out: only the accounts with these emails (separated by commas) may link it; nobody else sees its row. Only with `SURFACE_BRIDGE_TOKEN`. Unset (default): everyone may.",
+    section: "Chat surfaces",
+    example: "you@example.com",
   },
   SUPPORT_EMAIL: {
     schema: z.email().optional(),
@@ -1073,6 +1308,24 @@ export const envVars = {
     example: "<output of openssl rand -base64 48>",
     secret: true,
   },
+  REFERRALS_URL: {
+    schema: z.url({ protocol: /^https$/ }).optional(),
+    description:
+      "Your referral service's address (ADR 0192). Signed-in people get Refer and earn in their menu, and `/refer`, which open it signed in as them. Needs `REFERRALS_LINK_SECRET`, or `BILLING_LINK_SECRET` when this server also has a billing service, to sign the link. Unset (default): no referrals anywhere.",
+    section: "Operator",
+    example: "https://refer.example.com",
+  },
+  REFERRALS_LINK_SECRET: {
+    schema: z
+      .string()
+      .min(32, "must be at least 32 characters; generate one with `openssl rand -base64 48`")
+      .optional(),
+    description:
+      "Signs the link to the referral service (HMAC-SHA256, 5 minutes). The referral service holds the same value. Unset (default): `BILLING_LINK_SECRET` signs it. Generate with `openssl rand -base64 48`.",
+    section: "Operator",
+    example: "<output of openssl rand -base64 48>",
+    secret: true,
+  },
   BILLING_HOLD_NEW_WORKSPACES: {
     schema: z.stringbool().default(false),
     description:
@@ -1105,6 +1358,12 @@ export const envVars = {
     description: "Where the usage report is sent (the report as JSON in a POST).",
     section: "Usage report",
   },
+  PROBLEM_REPORT_URL: {
+    schema: z.union([z.literal("off"), z.url()]).default("https://telemetry.agentes.chat/v1/problem-report"),
+    description:
+      "Where Send a report sends a report someone chose to send after seeing it in full (versions, which settings are set, what failed, recent log lines; never messages, pages, names or keys). Sent even with `TELEMETRY=off`, since a person clicked Send. `off`: the button only copies the report.",
+    section: "Usage report",
+  },
   INSTALL_MODE: {
     schema: z.enum(["docker", "native", "desktop"]).optional(),
     description:
@@ -1114,6 +1373,12 @@ export const envVars = {
   LOG_LEVEL: {
     schema: z.enum(["debug", "info", "warn", "error"]).default("info"),
     description: "Minimum log level written to stdout.",
+    section: "Observability",
+  },
+  LOG_FORMAT: {
+    schema: z.enum(["json", "gcp"]).default("json"),
+    description:
+      "How each log line is written. json: time, level and msg. gcp: time, severity and message, the fields Google Cloud Logging reads.",
     section: "Observability",
   },
   SENTRY_DSN: {

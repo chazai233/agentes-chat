@@ -9,7 +9,8 @@ import {
   usePlatformKey,
   useUpdateAgent,
 } from "@agenteschat/client";
-import { EFFORT_LEVELS, type EffortLevel } from "@agenteschat/client/lib/brain-advanced";
+import { managesAgent } from "@agenteschat/client/lib/audience";
+import { type EffortLevel, effortLevelsOf, effortOf, effortTextOf } from "@agenteschat/client/lib/brain-advanced";
 import {
   mayPickModel,
   modelPickerModels,
@@ -68,12 +69,12 @@ export function ModelPickerButton({
   className?: string;
 }) {
   const { t } = useTranslation();
-  const { org, me } = useOrg();
+  const { me } = useOrg();
   const thinks = useAgentThinks(agent);
   if (!thinks?.text) return null;
   const mark = thinks.mark ? <ProviderLogo id={thinks.mark} size="xs" /> : <BrainIcon kind={thinks.kind} size={14} />;
   // The team's right hand thinks with each person's own AI ("Sua IA"), set where that is: never picked here.
-  if (!mayPickModel(agent, me.user.id, can(org, "manage_agents")))
+  if (!mayPickModel(agent, me.user.id, managesAgent(agent)))
     return (
       <span
         className={cx("mp-label", className)}
@@ -139,7 +140,7 @@ export function ModelStandInLine({
 }) {
   const { t } = useTranslation();
   const { org, me } = useOrg();
-  const may = mayPickModel(agent, me.user.id, can(org, "manage_agents"));
+  const may = mayPickModel(agent, me.user.id, managesAgent(agent));
   const key = may ? modelStandInKey(meta) : null;
   const ai = useAiAccounts(org.id, Boolean(key));
   const account = key
@@ -207,10 +208,8 @@ function PickerBody({ agent, view, onClose }: { agent: Agent; view: AgentBrain; 
   const shown = q.trim() ? rows.filter((r) => r.label.toLowerCase().includes(q.trim().toLowerCase())) : rows;
   const [busy, setBusy] = useState(false);
   const checked = rows.find((r) => r.checked);
-  const effortOn = tile?.current && tile.kind !== "model" && checked && !checked.auto;
-  const effort: EffortLevel = (EFFORT_LEVELS as readonly string[]).includes(view.effort ?? "")
-    ? (view.effort as EffortLevel)
-    : "medium";
+  const effortOn = tile?.current && checked && !checked.auto;
+  const effort = effortOf(view.brain, view.effort);
 
   const refresh = () => {
     for (const key of [keys.agentBrain(org.id, agent.id), keys.agents(org.id), keys.aiStatus(org.id)])
@@ -255,7 +254,7 @@ function PickerBody({ agent, view, onClose }: { agent: Agent; view: AgentBrain; 
     }
   };
   const setEffort = async (e: EffortLevel) => {
-    if (!tile || tile.kind === "model" || e === view.effort) return;
+    if (!tile || e === effort) return;
     try {
       await api.agents.setBrain(org.id, agent.id, { brain: tile.kind, effort: e });
     } catch {
@@ -373,22 +372,22 @@ function PickerBody({ agent, view, onClose }: { agent: Agent; view: AgentBrain; 
                 </span>
               )}
             </span>
-            {r.auto && <span className="mp__model-tag">{t("brain.picker.default")}</span>}
             <svg className="ac-menu__check" viewBox="0 0 20 20" aria-hidden="true">
               <path d="m5.5 10.5 3 3 6-7" />
             </svg>
           </button>
         ))}
       </div>
-      {effortOn && tile && tile.kind !== "model" && (
+      {effortOn && tile && (
         <div className="mp__effort">
           <EffortPixels
             label={t("agentPage.work.brain.effort")}
             value={effort}
             onValueChange={(e) => void setEffort(e)}
             color={fullLook(lookOf(agent)).color}
-            steps={EFFORT_LEVELS.map((e) => ({ value: e, label: t(`agentPage.work.brain.efforts.${e}`) }))}
-            hint={(e) => t(`agentPage.work.brain.effortText.${e}`)}
+            steps={effortLevelsOf(tile.kind).map((e) => ({ value: e, label: t(`agentPage.work.brain.efforts.${e}`) }))}
+            hint={(e) => t(`agentPage.work.brain.effortText.${effortTextOf(tile.kind, e)}`)}
+            unset={t("agentPage.work.brain.efforts.none")}
           />
         </div>
       )}

@@ -10,6 +10,7 @@ export type RolePermission =
   | "mention_everyone"
   | "manage_channels"
   | "talk_to_agents"
+  | "view_all_agents"
   | "assign_work"
   | "manage_routines"
   | "approve_actions"
@@ -85,7 +86,7 @@ export const setsAutoReply = (
 /**
  * Whether this person may put an agent in a channel or take it out of it: a channel they're in and may post in, or
  * one they manage. Mirrors the server's `placesAgentsIn` (packages/engine/src/channels.ts), which also needs the
- * agent to be theirs or `manage_agents`.
+ * agent to be theirs or one they manage (`managesAgent` in `./audience`).
  */
 export const addsAgentsTo = (
   channel: ChannelLike | null | undefined,

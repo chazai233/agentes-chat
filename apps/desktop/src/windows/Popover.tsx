@@ -30,7 +30,7 @@ import {
   newHelpRequests,
   siteLink,
 } from "../control/browser";
-import { DOCK_PREF, MENU_BAR_PREF, menuBarShown } from "../control/dock";
+import { MENU_BAR_PREF, menuBarShown } from "../control/dock";
 import { hereBanner, hereLine, isHereServer, type LocalServerStatus } from "../control/local-server";
 import { menuLabels } from "../control/menu-labels";
 import { NOTCH_PREF } from "../control/notch";
@@ -152,8 +152,7 @@ export function Popover() {
   const works = homes.length > 0;
   const busyHere = works || local.run;
   const [menuBarPref, setMenuBarPref] = useState(() => readPref<boolean | null>(MENU_BAR_PREF, null));
-  const [dockPref, setDockPref] = useState(() => readPref(DOCK_PREF, true));
-  const iconShown = menuBarShown(menuBarPref, dockPref, busyHere);
+  const iconShown = menuBarShown(menuBarPref, busyHere);
   useEffect(() => {
     void host.setTrayVisible(iconShown).catch(() => {});
   }, [host, iconShown]);
@@ -198,10 +197,10 @@ export function Popover() {
   useEffect(() => {
     const night = installNight(new Date(now));
     if (!night || triedNight.current === night || !update.state.available || jobs.length > 0) return;
-    if (!autoUpdateOn(readPref<boolean | null>(AUTO_UPDATE_PREF, null), local.run)) return;
+    if (!autoUpdateOn(readPref<boolean | null>(AUTO_UPDATE_PREF, null))) return;
     triedNight.current = night;
     void host.installUpdate().catch(() => {});
-  }, [now, update.state.available, jobs.length, local.run, host]);
+  }, [now, update.state.available, jobs.length, host]);
 
   useOnShown("popover", () => {
     setPauseMenu(false);
@@ -214,7 +213,6 @@ export function Popover() {
   useEffect(() => {
     const reread = () => {
       setMenuBarPref(readPref<boolean | null>(MENU_BAR_PREF, null));
-      setDockPref(readPref(DOCK_PREF, true));
       readList();
     };
     window.addEventListener("storage", reread);
@@ -294,9 +292,8 @@ export function Popover() {
     return off;
   }, [host, store]);
 
-  // In the Dock like Slack, unless the person took it out (Preferences › General); the site's notifications too.
+  // The site's notifications, unless the person turned them off (Preferences › General).
   useEffect(() => {
-    void host.setDock(readPref(DOCK_PREF, true)).catch(() => {});
     void host.setSiteNotify(readPref(SITE_NOTIFY_PREF, true)).catch(() => {});
   }, [host]);
 

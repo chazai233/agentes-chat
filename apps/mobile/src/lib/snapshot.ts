@@ -20,7 +20,8 @@ export const snapshotStoreFor = (server: string): SnapshotStorage => {
     },
     write: async (value) => {
       try {
-        file().writeSync(value);
+        // Written off the JS thread (the file system's own queue); awaited, so a failure lands here.
+        await file().write(value);
       } catch {
         // Not saved: the next launch loads from the server.
       }

@@ -8,6 +8,7 @@ import {
   useApprovals,
   useChannels,
   useNotificationAction,
+  useNotificationBulkPending,
   useNotificationCount,
   useNotificationReply,
   useNotifications,
@@ -27,6 +28,7 @@ import { latestText } from "@agenteschat/client/lib/message-body";
 import {
   allItems,
   askersOf,
+  canClearAll,
   channelOf,
   groupByDay,
   headlineNames,
@@ -180,8 +182,9 @@ function sourceOf(t: TFunction, n: AppNotification, channelName: (id: string) =>
   else if (n.kind === "approval") [icon, label] = ["shield", t("notifications.source.approval")];
   else if (n.kind === "approval_cover" || n.kind === "right_hand_paused")
     [icon, label] = ["approve", t("settings.section.approvals")];
-  else if (n.kind === "join_request" || n.kind === "invitation_accepted")
-    [icon, label] = ["members", t("notifications.source.members")];
+  // A request opens People › Convites, where it is answered (ADR 0184); someone who joined, Members.
+  else if (n.kind === "join_request") [icon, label] = ["mail", t("settings.section.invites")];
+  else if (n.kind === "invitation_accepted") [icon, label] = ["members", t("notifications.source.members")];
   else if (n.kind === "composio_limit") [icon, label] = ["wallet", t("notifications.source.usage")];
   else if (n.kind === "skill_update") [icon, label] = ["book", t("skills.title")];
   else if (
@@ -220,35 +223,6 @@ function sourceOf(t: TFunction, n: AppNotification, channelName: (id: string) =>
   } else if (channel && !headlineNames(n, channelName(channel)))
     [icon, label] = ["channel", t("notifications.source.channel", { name: channelName(channel) })];
   return label ? [icon, label] : null;
-}
-
-/** Where it happened, as a chip, unless the headline says it. */
-function SourceChip({
-  n,
-  channelName,
-  className,
-}: {
-  n: AppNotification;
-  channelName: (id: string) => string;
-  className?: string;
-}) {
-  const { t } = useTranslation();
-  const source = sourceOf(t, n, channelName);
-  if (!source) return null;
-  const channel = channelOf(n);
-  return (
-    <Chip icon={source[0]} className={className}>
-      {/* The channel's icon is its #: the words show its bare name, a screen reader still hears the #. */}
-      {source[0] === "channel" && channel ? (
-        <>
-          <span className="ac-visually-hidden">#</span>
-          {channelName(channel)}
-        </>
-      ) : (
-        source[1]
-      )}
-    </Chip>
-  );
 }
 
 /** How long is left to answer, as a chip that turns to attention in the last hours. */
@@ -527,6 +501,8 @@ interface RowState {
   fresh: boolean;
   pulse: boolean;
   leaving: boolean;
+  /** "Concluir todas" or its undo is under way: the row's own actions wait for it. */
+  busy: boolean;
 }
 
 /**
@@ -544,7 +520,7 @@ function clickRow(e: MouseEvent<HTMLElement>, n: AppNotification, h: RowHandlers
 }
 
 /** The inline actions: a small floating bar on desktop (hover / focus), a row on phones (tap). */
-function RowActions({ n, h }: { n: AppNotification; h: RowHandlers }) {
+function RowActions({ n, h, busy }: { n: AppNotification; h: RowHandlers; busy: boolean }) {
   const { t } = useTranslation();
   const act = (key: string, icon: IconName, label: string, tip: string, short: string, run?: () => void) => (
     <button
@@ -553,6 +529,7 @@ function RowActions({ n, h }: { n: AppNotification; h: RowHandlers }) {
       data-act={key}
       title={tip}
       aria-label={label}
+      disabled={busy && key !== "open"}
       onClick={(e) => {
         e.stopPropagation();
         run?.();
@@ -766,14 +743,22 @@ function Row({
               : latestText(t, l) || (media ? mediaWord(t, media) : l.text);
   const stopStep = steps ? (steps.failedAt ?? steps.done + 1) : 0;
   const stepWords = steps
-    ? failed
-      ? t("notifications.stoppedAt", { step: Math.min(stopStep, steps.total), total: steps.total })
-      : t("notifications.steps", { done: steps.done, total: steps.total })
+    ? t("notifications.stoppedAt", { step: Math.min(stopStep, steps.total), total: steps.total })
     : "";
   const agentColor = first?.type === "agent" ? colorOf(dir.anyAgent(first.id)) : undefined;
   const channel = channelOf(n);
   const statusMove = n.kind === "issue_status" && (l.statusFrom || l.statusTo);
-  const tags = !reaction && (sourceOf(t, n, channelName) || statusMove);
+  // Where it happened and a task's move lead the snippet's line in plain words: one muted line, no chips.
+  const where = reaction
+    ? ""
+    : [
+        sourceOf(t, n, channelName)?.[1],
+        statusMove
+          ? t("notifications.status", { from: statusName(t, l.statusFrom), to: statusName(t, l.statusTo) })
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
   return (
     // biome-ignore lint/a11y/useSemanticElements: a row of the inbox, not a fieldset
     <div
@@ -804,17 +789,6 @@ function Row({
       </span>
       <span className="ac-mediarow__end nt-tm">{whenText(t, i18n.language, n.updatedAt)}</span>
       <div className="ac-mediarow__body">
-        {tags && (
-          <span className="nt-tags">
-            <SourceChip n={n} channelName={channelName} />
-            {/* The arrow is in its words: no icon to say it again. */}
-            {statusMove && (
-              <Chip className="nt-chip-ink">
-                {t("notifications.status", { from: statusName(t, l.statusFrom), to: statusName(t, l.statusTo) })}
-              </Chip>
-            )}
-          </span>
-        )}
         {reaction ? (
           <>
             {l.quote && (
@@ -837,24 +811,24 @@ function Row({
           </>
         ) : (
           <>
-            {(text || lead) && (
+            {(text || lead || where) && (
               <p className={cx("nt-snip", restriction && "nt-snip--whole")}>
+                {where && <span className="nt-where">{where}</span>}
+                {where && (text || lead) && " · "}
                 {lead && <b>{t("notifications.lead", { text: lead })} </b>}
                 {speaker && <b>{t("notifications.speaker", { name: speaker })} </b>}
                 {text && <Snippet text={text} mine={mine} />}
               </p>
             )}
-            {steps && (
+            {/* A finished run says nothing extra: only a stopped one shows where it stopped. */}
+            {steps && failed && (
               <div className="nt-steprow">
                 <PlanStrip
                   cells={stepCells({ ...steps, failedAt: failed ? stopStep : undefined })}
                   color={agentColor}
                   label={stepWords}
                 />
-                <Chip
-                  icon={failed ? "alert" : "check"}
-                  className={cx("nt-chip-ink", failed ? "nt-chip-warn" : "nt-chip-ok")}
-                >
+                <Chip icon="alert" className="nt-chip-ink nt-chip-warn">
                   {stepWords}
                 </Chip>
               </div>
@@ -934,7 +908,7 @@ function Row({
           </>
         )}
       </div>
-      <RowActions n={n} h={h} />
+      <RowActions n={n} h={h} busy={s.busy} />
     </div>
   );
 }
@@ -985,6 +959,7 @@ function WaitCard({
             icon="clock"
             aria-label={t("notifications.snooze")}
             title={t("notifications.snooze")}
+            disabled={s.busy}
           />
         }
       />
@@ -995,6 +970,7 @@ function WaitCard({
         icon="check"
         aria-label={t("notifications.done")}
         title={t("notifications.doneTip")}
+        disabled={s.busy}
         onClick={(e) => {
           e.stopPropagation();
           h.onDone(n);
@@ -1312,7 +1288,7 @@ function WaitRow({
           <Headline n={n} dir={dir} channelName={channelName} />
         </p>
         {sub && <p className="nt-wr__sub">{sub}</p>}
-        <div className="rq__foot nt-wr__acts">
+        <div className="rq__foot ac-tailrow nt-wr__acts">
           {/* A board's notice is decided or resolved right here (ADR 0135). */}
           <WidgetNoticeActions n={n} onOpen={() => h.onOpen(n)} open={false} />
           <DeviceNoticeActions n={n} inline />
@@ -1321,7 +1297,7 @@ function WaitRow({
           <Button size="sm" className="nt-wr__open" title={t("notifications.openTip")} onClick={() => h.onOpen(n)}>
             {found?.act ? (t as unknown as (key: string) => string)(found.act) : t("notifications.open")}
           </Button>
-          <span className="rq__end">{tail}</span>
+          <span className="rq__end ac-tail">{tail}</span>
         </div>
       </div>
       {children}
@@ -1474,7 +1450,12 @@ export function NotificationsPage({ waitingOnly = false }: { waitingOnly?: boole
     later(finish, LEAVE_MS);
   };
 
+  // Its own observer: a row's read or Feito on the page's `action` must not take over the clear's toast and Desfazer.
+  const bulkAction = useNotificationAction(org.id);
+  const bulk = useNotificationBulkPending(org.id);
+
   const done = (n: AppNotification) => {
+    if (bulk) return;
     if (n.doneAt) {
       leave(n, () => action.mutate({ type: "done", item: n, done: false }));
       toast.show(t("notifications.toast.restored"), "info", {
@@ -1498,6 +1479,7 @@ export function NotificationsPage({ waitingOnly = false }: { waitingOnly?: boole
   };
 
   const snooze = (n: AppNotification, choice: SnoozeChoice) => {
+    if (bulk) return;
     const until = snoozeTimes()[choice].toISOString();
     leave(n, () => action.mutate({ type: "snooze", item: n, until }));
     const title =
@@ -1602,6 +1584,26 @@ export function NotificationsPage({ waitingOnly = false }: { waitingOnly?: boole
       },
     );
   };
+
+  const doneAll = () =>
+    bulkAction.mutate(
+      { type: "doneAll", filter },
+      {
+        onSuccess: (res) => {
+          setCur(null);
+          if (res.ids.length)
+            toast.show(t("notifications.toast.doneAll", { count: res.ids.length }), "info", {
+              label: t("notifications.toast.undo"),
+              run: () =>
+                bulkAction.mutate(
+                  { type: "undoneMany", ids: res.ids },
+                  { onError: (e) => toast.show(errorText(t, e), "error") },
+                ),
+            });
+        },
+        onError: (e) => toast.show(errorText(t, e), "error"),
+      },
+    );
 
   const toggle = (n: AppNotification) => {
     setOpen((s) => {
@@ -1709,6 +1711,7 @@ export function NotificationsPage({ waitingOnly = false }: { waitingOnly?: boole
     fresh: fresh.has(n.id),
     pulse: pulse.has(n.id),
     leaving: leaving.has(n.id),
+    busy: bulk,
   });
 
   const summary = waitingOnly
@@ -1729,8 +1732,10 @@ export function NotificationsPage({ waitingOnly = false }: { waitingOnly?: boole
     <div className="page page--list nt">
       <PageHeader
         title={title}
-        // On the title's row: the counts the sidebar already has show at once, the list's own replace them.
-        count={(list.isSuccess || badge.isSuccess) && summary}
+        // The counts the sidebar already has show at once, the list's own replace them: on the title's row in
+        // Notifications; on "Esperando você" the line under the title, as the Approvals page says what waits.
+        count={waitingOnly ? undefined : (list.isSuccess || badge.isSuccess) && summary}
+        meta={waitingOnly ? ((list.isSuccess || badge.isSuccess) && summary) || undefined : undefined}
         actions={
           <>
             <Menu
@@ -1762,8 +1767,13 @@ export function NotificationsPage({ waitingOnly = false }: { waitingOnly?: boole
               </MenuItem>
             </Menu>
             {!waitingOnly && (
-              <Button disabled={doneView || !counts?.unread || action.isPending} onClick={readAll}>
+              <Button disabled={doneView || !counts?.unread || action.isPending || bulk} onClick={readAll}>
                 {t("notifications.readAll")}
+              </Button>
+            )}
+            {!waitingOnly && (
+              <Button disabled={!canClearAll(filter, counts, items) || action.isPending || bulk} onClick={doneAll}>
+                {t("notifications.doneAll")}
               </Button>
             )}
           </>

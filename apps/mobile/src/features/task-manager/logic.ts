@@ -1,4 +1,4 @@
-import type { ComputerSummary, EndedTask, ManagedTask } from "@agenteschat/client";
+import type { EndedTask, ManagedTask } from "@agenteschat/client";
 import {
   type AgentTasks,
   delegationText,
@@ -57,7 +57,7 @@ export const isHeld = (state: RowState): state is HeldState =>
   state === "computerBusy" || state === "computerOffline" || state === "plan" || state === "budget";
 
 /**
- * A task's state on its row: a wait says what holds it and what comes next ("Pausada: plano a 95% da semana", "Volta
+ * A task's state on its row: a wait says what holds it and what comes next ("Pausada: plano a 99% da semana", "Volta
  * sáb às 18:00"; "Na fila · 2º", "começa em ~3 min").
  */
 export function taskStateWords(
@@ -71,13 +71,6 @@ export function taskStateWords(
   if (state === "queued") return { state: t("taskManager.state.queued"), next: null };
   if (state === "stopping") return { state: t("taskManager.state.stopping"), next: null };
   return taskWaitWords(t, locale, task, now) ?? { state: t("taskManager.state.answer"), next: null };
-}
-
-/** A computer on the task manager: "Cheio · 2 na fila · 3 trabalhando", "Tem espaço · 1 trabalhando". */
-export function computerLine(t: TFunction, computer: Pick<ComputerSummary, "working" | "inLine">): string {
-  const room =
-    computer.inLine > 0 ? t("taskManager.queue.full", { count: computer.inLine }) : t("taskManager.queue.room");
-  return computer.working > 0 ? `${room} · ${t("taskManager.working", { count: computer.working })}` : room;
 }
 
 /**
@@ -127,17 +120,6 @@ export function taskSubline(
   const chain = delegationText(t, task, agentName, meId);
   const helpers = task.helpers ? t("taskManager.helpers", { count: task.helpers }) : null;
   return [where === title ? null : where, chain ?? asked, plan, helpers].filter(Boolean).join(" · ");
-}
-
-/** How a task ended, for "Terminadas hoje": done, stopped (by you, by someone), or couldn't finish. */
-export function endedText(t: TFunction, task: Pick<EndedTask, "status" | "stoppedBy">, meId: string | null): string {
-  const state = endedState(task);
-  if (state === "done") return t("taskManager.ended.done");
-  if (state === "failed") return t("taskManager.ended.failed");
-  if (!task.stoppedBy) return t("taskManager.state.stopped");
-  return task.stoppedBy.userId === meId
-    ? t("taskManager.ended.stopped")
-    : t("taskManager.ended.stoppedBy", { name: task.stoppedBy.name });
 }
 
 /** "Terminadas hoje", the latest first. */

@@ -19,9 +19,9 @@ export const showsActivity = (org: Pick<OrgSummary, "showActivity"> | null | und
 export const toolLabel = (name: string) => name.replace(/[_-]+/g, " ").trim();
 
 /** A tool in "Usou a ferramenta …": the catalog's words, else its own name in words, without the app it starts with. */
-function toolWords(t: TFunction, tool: string) {
+function toolWords(t: TFunction, tool: string, locale?: string) {
   const worded = catalogLabel(t, tool);
-  return worded ? lowerFirst(worded) : toolLabel(toolKey(tool).key || tool);
+  return worded ? lowerFirst(worded, locale) : toolLabel(toolKey(tool).key || tool);
 }
 
 /** One thing the agent did (a tool call), for the work summary: what it did, in which service. */
@@ -144,12 +144,27 @@ export function workMeta(meta: Record<string, unknown> | undefined): WorkMeta | 
  */
 const UNLISTED: ReadonlySet<ActivityKind> = new Set(["reacting", "findingTools"]);
 
-/** One of `meta.work`'s calls that is only lookups: ours by name, with no app it could share a logo with. */
-const onlyLookups = (c: WorkCall) => !c.connector && !c.service && UNLISTED.has(toolActivity(c.name).kind);
+/**
+ * The line an agent says before slow work (`say_now`, ADR 0207) is its own message in the conversation, never a step
+ * of the work: left out by its name, since its kind is `post_message`'s, which stays listed. Ours, also behind a
+ * computer brain's bridge (`mcp__agentes__say_now`). The server's `meta.work` leaves it out too.
+ */
+const SAY_NOW = /^(?:mcp__agentes__)?say_now$/;
+
+/** A call the block never lists: by what it does (`UNLISTED`), or the line before slow work by its name. */
+const unlisted = (tool: string, a: Pick<Activity, "kind">) =>
+  UNLISTED.has(a.kind) || SAY_NOW.test(tool.trim().toLowerCase());
+
+/** A live call the block lists: the ones it leaves out (`unlisted`) are never its lines, nor the step line's call. */
+const listedCall = (w: LiveWork): w is Extract<LiveWork, { kind: "call" }> =>
+  w.kind === "call" && !unlisted(w.tool, toolActivity(w.tool, w.connector, w.detail, w));
+
+/** One of `meta.work`'s calls the block never lists: ours by name, with no app it could share a logo with. */
+const neverListed = (c: WorkCall) => !c.connector && !c.service && unlisted(c.name, toolActivity(c.name));
 
 /** A saved reply's apps before its steps load (`meta.work.calls`): the ones `toolApps` gives once they do. */
 export const workApps = (calls: WorkCall[]) =>
-  uniqueApps(calls.filter((c) => !onlyLookups(c)).map((c) => toolActivity(c.name, c.connector, null, c)));
+  uniqueApps(calls.filter((c) => !neverListed(c)).map((c) => toolActivity(c.name, c.connector, null, c)));
 
 /**
  * How many calls a saved reply's block shows (0: no block). A reply saved before lookups were left out counted them.
@@ -157,7 +172,7 @@ export const workApps = (calls: WorkCall[]) =>
  * their count shows its total unless every call is skipped.
  */
 export function workSteps(w: WorkMeta, skip: (name: string) => boolean = () => false) {
-  if (w.calls.length > 0 && w.calls.every((c) => onlyLookups(c) || skip(c.name))) return 0;
+  if (w.calls.length > 0 && w.calls.every((c) => neverListed(c) || skip(c.name))) return 0;
   return w.calls.reduce((n, c) => (skip(c.name) && typeof c.n === "number" ? n - c.n : n), w.steps);
 }
 
@@ -205,7 +220,7 @@ export function workFromSteps(steps: RunStep[], run?: Pick<Run, "createdAt" | "f
       service: typeof s.data.service === "string" ? s.data.service : null,
       serviceIcon: typeof s.data.serviceIcon === "string" ? s.data.serviceIcon : null,
     });
-    if (UNLISTED.has(a.kind)) continue;
+    if (unlisted(name, a)) continue;
     const app = a.kind === "consulting" ? a.app : DRIVE.includes(a.kind) ? "Drive" : undefined;
     if (app && !connectors.includes(app)) connectors.push(app);
     const input = (s.data.input ?? {}) as Record<string, unknown>;
@@ -341,8 +356,8 @@ export function workHeader(t: TFunction, w: { steps: number; connectors: string[
 }
 
 /** "Consultou o Himetrica", "Atualizou o plano", and for a tool with no words of its own "Usou a ferramenta enviar e-mail". */
-export function stepLabel(t: TFunction, s: Pick<WorkItem, "kind" | "app" | "tool">) {
-  return t(`chat.work.step.${s.kind}`, { app: appLabel(s), tool: toolWords(t, s.tool) });
+export function stepLabel(t: TFunction, s: Pick<WorkItem, "kind" | "app" | "tool">, locale?: string) {
+  return t(`chat.work.step.${s.kind}`, { app: appLabel(s), tool: toolWords(t, s.tool, locale) });
 }
 
 /**
@@ -362,10 +377,11 @@ export const shownSteps = <T extends { tool: string }>(steps: readonly T[]): T[]
 export function stepPhrase(
   t: TFunction,
   step: { tool: string; detail?: string | null; outcome?: "refused" | "waiting" },
+  locale?: string,
 ) {
   const a = toolActivity(step.tool, null, step.detail);
   const state = step.outcome === "refused" ? "fail" : step.outcome === "waiting" ? "stop" : "done";
-  const label = toolPhrase(t, { ...a, tool: step.tool, state });
+  const label = toolPhrase(t, { ...a, tool: step.tool, state }, locale);
   const detail = step.detail?.trim();
   return detail && detail !== a.app ? `${label} · ${detail}` : label;
 }
@@ -384,31 +400,38 @@ export function foldSteps<T>(steps: T[], text: (step: T) => string): { step: T; 
   return lines;
 }
 
+/** Who or what stopped a run, as its stopped reply's `meta.canceled` keeps it (the engine's `stopCanceled`). */
+export interface ReplyStop {
+  byUserId: string | null;
+  /** The agent that stopped it at that person's word (the right hand). */
+  byAgentId: string | null;
+  /** Nobody stopped it: its cause (`run.agent_archived`…), in the person's words through `runErrorText`. */
+  code: string | null;
+}
+
+/** The stop of a reply's `meta.canceled` (`true` on older replies, else an object). */
+export function replyStopOf(canceled: unknown): ReplyStop {
+  const c = typeof canceled === "object" && canceled ? (canceled as Record<string, unknown>) : {};
+  const str = (v: unknown) => (typeof v === "string" && v ? v : null);
+  return { byUserId: str(c.byUserId), byAgentId: str(c.byAgentId), code: str(c.code) };
+}
+
 /**
- * A message of a stopped run (`meta.canceled`, `true` or `{ byUserId }`) ends
- * with the server's "_Interrompido por Walter._": that line leaves the text,
- * and the note is written on the client, in the UI language, from the meta.
- * `note` is the server's line (only a fallback when the meta has no person).
+ * A message of a stopped run (`meta.canceled`, `true` or an object) ends with the server's English "_Stopped by
+ * Walter._": that line leaves the text, and the apps word the stop in the person's language from the meta.
  */
-export function splitCanceled(body: string, meta: Record<string, unknown> | undefined) {
+export function splitCanceled(
+  body: string,
+  meta: Record<string, unknown> | undefined,
+): ReplyStop & { body: string; canceled: boolean } {
   const canceled = meta?.canceled;
-  if (!canceled) return { body, canceled: false, byUserId: null as string | null, note: null as string | null };
-  const byUserId =
-    typeof canceled === "object" && canceled && typeof (canceled as { byUserId?: unknown }).byUserId === "string"
-      ? ((canceled as { byUserId: string }).byUserId as string)
-      : null;
+  const stop = replyStopOf(canceled);
+  if (!canceled) return { body, canceled: false, ...stop };
   // The server also sends what the agent wrote, without the note.
-  const said = typeof canceled === "object" && canceled ? (canceled as { text?: unknown }).text : undefined;
+  const said = typeof canceled === "object" ? (canceled as { text?: unknown }).text : undefined;
+  if (typeof said === "string") return { body: said, canceled: true, ...stop };
   const match = /\n*\s*_([^_\n]+)_\s*$/.exec(body);
-  if (typeof said === "string")
-    return { body: said, canceled: true, byUserId, note: match?.[1]?.trim().replace(/\.$/, "") ?? null };
-  if (!match) return { body, canceled: true, byUserId, note: null };
-  return {
-    body: body.slice(0, match.index).trimEnd(),
-    canceled: true,
-    byUserId,
-    note: (match[1] ?? "").trim().replace(/\.$/, ""),
-  };
+  return { body: match ? body.slice(0, match.index).trimEnd() : body, canceled: true, ...stop };
 }
 
 /**
@@ -572,22 +595,21 @@ const sameLine = (a: ToolLine, b: Activity & { tool: string }) =>
 /**
  * The live work as the block's items: a call followed by the same kind of call (no code, nothing said in
  * between, neither failed) is one line counting both, so five browser steps read "Usou o navegador ×5".
- * Reactions and tool lookups are left out (`UNLISTED`), as in `workFromSteps`. `stopped`: the run is over, so the call
- * still running shows as stopped. A call refused for its arguments reads as still at it while the agent tries again,
- * and quietly once one of the same tool works; an error only if the run ends or moves on without that.
+ * Reactions, tool lookups and the line before slow work are left out (`unlisted`), as in `workFromSteps`. `stopped`:
+ * the run is over, so the call still running shows as stopped. A call refused for its arguments reads as still at it
+ * while the agent tries again, and quietly once one of the same tool works; an error only if the run ends or moves on
+ * without that.
  */
 export function toolItemsLive(work: LiveWork[], stopped = false): ToolItem[] {
   const items: ToolItem[] = [];
-  const listed = work.flatMap((w) =>
-    w.kind === "call" && !UNLISTED.has(toolActivity(w.tool, w.connector, w.detail, w).kind) ? [w] : [],
-  );
+  const listed = work.filter(listedCall);
   work.forEach((w) => {
     if (w.kind === "steer") {
       items.push({ kind: "steer", key: `steer-${w.messageId}`, messageId: w.messageId, now: w.now === true });
       return;
     }
     const a = toolActivity(w.tool, w.connector, w.detail, w);
-    if (UNLISTED.has(a.kind)) return;
+    if (unlisted(w.tool, a)) return;
     const later = listed.slice(listed.indexOf(w) + 1);
     const atIt = !stopped && later.every((c) => c.slip && c.tool === w.tool);
     const trying = w.slip === true && atIt && later.length === 0;
@@ -746,14 +768,14 @@ export const toolNow = (items: ToolItem[]) => linesOf(items).at(-1) ?? null;
  * consultando o GitHub" when it failed, "Consultando o GitHub" (no dots) when the run stopped during it.
  * A command the permission check refused says so: "Recusado: Rerun the tests".
  */
-export function toolPhrase(t: TFunction, l: Pick<ToolLine, "kind" | "app" | "tool" | "state">) {
+export function toolPhrase(t: TFunction, l: Pick<ToolLine, "kind" | "app" | "tool" | "state">, locale?: string) {
   const verb = activityVerb(t, { kind: l.kind, app: l.app });
   if (l.state === "run") return `${capitalize(verb)}…`;
   if (l.state === "stop") return capitalize(verb);
   if (l.state === "fail" && l.kind === "runningCommand") return t("chat.work.refused", { app: appLabel(l) });
   if (l.state === "fail" && l.kind === "runningCommandAny") return t("chat.work.refusedAny");
   if (l.state === "fail") return t("chat.work.erred", { activity: verb });
-  return t(`chat.work.step.${l.kind}`, { app: appLabel(l), tool: toolWords(t, l.tool) });
+  return t(`chat.work.step.${l.kind}`, { app: appLabel(l), tool: toolWords(t, l.tool, locale) });
 }
 
 /** A turn quicker than this shows nothing new: its step line says the agent's own words only past it. */
@@ -774,8 +796,10 @@ export function waitStep(t: TFunction, work: LiveWork[] | undefined, step?: Live
     return step?.tool ? `${capitalize(activityVerb(t, toolActivity(step.tool)))}…` : t("chat.wait.thinking");
   }
   const verb = capitalize(activityVerb(t, now));
-  // The folded line keeps its first call's hint; the step line names the call running now.
-  const hint = last?.kind === "call" && last.running ? toolHint(last.tool, now, last.detail) : now.hint;
+  // The folded line keeps its first call's hint; the step line names the call running now, one the block lists: a call
+  // it leaves out (the line before slow work, after a call refused for its arguments) never lends it its name.
+  const listed = (work ?? []).findLast(listedCall);
+  const hint = listed?.running ? toolHint(listed.tool, now, listed.detail) : now.hint;
   const target = hint ? shortTarget(hint) : "";
   return target ? `${verb} · ${target}…` : `${verb}…`;
 }
@@ -830,11 +854,16 @@ const QUIET_READS: ReadonlySet<ActivityKind> = new Set([
 /** The computer brain's own image tool (Codex's), as the runner names its call. */
 export const IMAGE_TOOL = "image_generation";
 
+/** Ours (ADR 0197): images made onto a canvas, as `agent.tool` names its call (a computer brain's through the bridge). */
+export const GENERATE_IMAGE_TOOL = "generate_image";
+const GENERATE_IMAGE_NAMES = new Set([GENERATE_IMAGE_TOOL, `mcp__agentes__${GENERATE_IMAGE_TOOL}`]);
+
 /**
- * It is making a picture now (its own image tool's step, `agent.step`): the conversation shows where the picture will
- * be until its reply, with the picture, takes its place.
+ * It is making a picture now (its own image tool's step, `agent.step`, or our `generate_image` while it runs,
+ * `agent.tool`): the conversation shows where the picture will be until its reply, with the picture, takes its place.
  */
-export const makingImage = (run: Pick<LiveRun, "step">) => run.step?.tool === IMAGE_TOOL;
+export const makingImage = (run: Pick<LiveRun, "step"> & Partial<Pick<LiveRun, "tool">>) =>
+  run.step?.tool === IMAGE_TOOL || GENERATE_IMAGE_NAMES.has(run.tool ?? "");
 
 /** A step running this long is no quick read: its card stays. */
 const LONG_STEP_MS = 4000;

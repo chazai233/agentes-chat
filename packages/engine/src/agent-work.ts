@@ -14,9 +14,10 @@ const { approvals } = schema;
 /**
  * How a run stands for the viewer: `you` (it waits on their decision or answer), `working`, a neutral wait (on
  * someone's approval, on someone's answer, on its computer, on its AI provider) or `queued` (in line for a worker or
- * for room on its computer). A run waiting on its plan or its budget is none: out of office says it.
+ * for room on its computer). A run waiting on its plan or its budget is none: out of office says it. `later`: no run on,
+ * a return it set comes at `at` (`pendingReturns`).
  */
-export type AgentWorkState = "you" | "working" | "approval" | "answer" | "computer" | "outage" | "queued";
+export type AgentWorkState = "you" | "working" | "approval" | "answer" | "computer" | "outage" | "queued" | "later";
 
 export interface AgentWork {
   state: AgentWorkState;
@@ -27,7 +28,7 @@ export interface AgentWork {
   runId: string;
   /** Where it shows, when the viewer reads that conversation; null otherwise (and for a routine's work). */
   channelId: string | null;
-  channelKind: "channel" | "dm" | "task" | null;
+  channelKind: "channel" | "dm" | "task" | "file" | null;
   /** A channel's name; null for a DM or a task's conversation. */
   channelName: string | null;
   /** Null: the conversation's main timeline. */
@@ -40,6 +41,8 @@ export interface AgentWork {
   routine: boolean;
   /** How many runs it has on, whatever the viewer reads of them. */
   count: number;
+  /** With `later`: when it comes back to that conversation. */
+  at?: string;
 }
 
 const OPEN = sql.raw("('queued', 'running', 'waiting_approval', 'waiting_input')");
@@ -102,6 +105,26 @@ export const waitSinceIn = (r: string) =>
     end,
     ${r}.updated_at)`);
 
+/**
+ * Whether a run waits on `viewerId`, over the run alias `r`: an approval they may decide (`decidableBySql`), or the
+ * question or secret asked of them. An agent's line and the task manager's rows read the same rule.
+ */
+export const waitsOnViewerIn = (r: string, viewerId: string) => {
+  const run = sql.raw(r);
+  const viewer = sql`${viewerId}::text`;
+  return sql`case ${run}.status
+    when 'waiting_approval' then exists (select 1 from ${approvals}
+      where ${approvals.orgId} = ${run}.org_id and ${approvals.runId} = ${run}.id and ${approvals.status} = 'pending'
+        and ${decidableBySql(viewerId)})
+    when 'waiting_input' then exists (select 1 from agent_questions q
+        where q.org_id = ${run}.org_id and q.run_id = ${run}.id and q.status = 'open' and q.expires_at > now()
+          and q.requested_for_user_id = ${viewer})
+      or exists (select 1 from secret_requests s
+        where s.org_id = ${run}.org_id and s.run_id = ${run}.id and s.status = 'pending'
+          and s.requested_for_user_id = ${viewer})
+    else false end`;
+};
+
 type Row = {
   run_id: string;
   agent_id: string;
@@ -115,7 +138,7 @@ type Row = {
   anchored: boolean | string;
   anchor_background: boolean | string;
   channel_id: string;
-  channel_kind: "channel" | "dm" | "task";
+  channel_kind: "channel" | "dm" | "task" | "file";
   channel_name: string;
   thread_root_id: string;
   trigger_message_id: string;
@@ -159,6 +182,7 @@ const RANK: Record<AgentWorkState, number> = {
   computer: 2,
   outage: 2,
   queued: 3,
+  later: 4,
 };
 
 /**
@@ -185,17 +209,7 @@ export async function agentWorkFor(
         c.id as channel_id, c.kind as channel_kind, c.name as channel_name, a.thread_root_id, a.trigger_message_id,
         a.reply_message_id,
         (c.archived_at is null and not ${agentsOnlyIn("c")} and ${channelReaderSql(sql`c.id`, viewer)}) as readable,
-        case r.status
-          when 'waiting_approval' then exists (select 1 from ${approvals}
-            where ${approvals.orgId} = r.org_id and ${approvals.runId} = r.id and ${approvals.status} = 'pending'
-              and ${decidableBySql(viewerId)})
-          when 'waiting_input' then exists (select 1 from agent_questions q
-              where q.org_id = r.org_id and q.run_id = r.id and q.status = 'open' and q.expires_at > now()
-                and q.requested_for_user_id = ${viewer})
-            or exists (select 1 from secret_requests s
-              where s.org_id = r.org_id and s.run_id = r.id and s.status = 'pending'
-                and s.requested_for_user_id = ${viewer})
-          else false end as you,
+        ${waitsOnViewerIn("r", viewerId)} as you,
         g.builtin = 'right_hand' as right_hand
       from anchors t
       join agent_runs r on r.id = t.run_id

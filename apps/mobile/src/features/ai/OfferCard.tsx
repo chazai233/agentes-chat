@@ -20,7 +20,7 @@ import {
 } from "@agenteschat/client/lib/action-cards";
 import { APP_PAGES, appPagePath } from "@agenteschat/client/lib/app-pages";
 import { slotText } from "@agenteschat/client/lib/calendar";
-import { connectedItems } from "@agenteschat/client/lib/connected";
+import { connectedItems, personalAllowed } from "@agenteschat/client/lib/connected";
 import { errorText } from "@agenteschat/client/lib/errors";
 import { joinNames } from "@agenteschat/client/lib/format";
 import { hostOf } from "@agenteschat/client/lib/import/shared";
@@ -89,7 +89,8 @@ function ConnectApp({ card }: { card: Extract<Card, { kind: "connect_app" }> }) 
       why={card.why}
       detail={card.url}
       done={done ? `${t("actionCard.connected")}: ${title}` : null}
-      action={can(org, "manage_connectors") ? t("actionCard.connect") : null}
+      // Every member connects it, as their own when they may not add the team's; GitHub only for the team.
+      action={can(org, "manage_connectors") || personalAllowed(card.connector) ? t("actionCard.connect") : null}
       onAction={() => router.push(`/connectors?${query}` as never)}
       blocked={t("actionCard.connect_app.adminOnly")}
     />
@@ -121,11 +122,13 @@ function Invite({ card }: { card: Extract<Card, { kind: "invite_people" }> }) {
   );
 }
 
-/** Its screen's check row turns what installs on for the agent that posted the card (`agentId`), as on the web. */
+/**
+ * Its screen's check row turns what installs on for the agent that posted the card (`agentId`), as on the web. Anyone
+ * opens it: who doesn't manage agents installs it as their own personal skill.
+ */
 function InstallSkill({ card, agentId }: { card: Extract<Card, { kind: "install_skill" }>; agentId: string | null }) {
   const { t } = useTranslation();
-  const { orgId, org } = useOrg();
-  const may = can(org, "manage_agents");
+  const { orgId } = useOrg();
   const skills = useSkills(orgId);
   return (
     <OfferShell
@@ -134,14 +137,14 @@ function InstallSkill({ card, agentId }: { card: Extract<Card, { kind: "install_
       why={card.why}
       detail={card.url}
       done={installSkillDone(card, skills.data ?? []) ? `${t("actionCard.install_skill.done")}: ${card.url}` : null}
-      action={may ? t("actionCard.install_skill.open") : null}
+      action={t("actionCard.install_skill.open")}
       onAction={() => {
         if (agentId) openedFromCard({ url: card.url, agentId });
         router.push(
           `/settings/skills/new?url=${encodeURIComponent(card.url)}${agentId ? `&agent=${encodeURIComponent(agentId)}` : ""}` as never,
         );
       }}
-      blocked={t("actionCard.install_skill.adminOnly")}
+      blocked=""
     />
   );
 }

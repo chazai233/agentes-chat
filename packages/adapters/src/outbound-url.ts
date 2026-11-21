@@ -3,6 +3,9 @@ export const KEY_SHAPES =
   /\b(sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9._-]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,})/g;
 /** Credential shapes that signed and presigned addresses carry by design (an AWS key id, a JWT). */
 export const SIGNED_SHAPES = /\b(AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,})/g;
+/** `text` with every key shape (`KEY_SHAPES`, `SIGNED_SHAPES`) replaced by `[REDACTED]`. */
+export const maskKeyShapes = (text: string) =>
+  text.replace(KEY_SHAPES, "[REDACTED]").replace(SIGNED_SHAPES, "[REDACTED]");
 /** A private key, by its first line. */
 export const PRIVATE_KEY = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
 
@@ -36,12 +39,16 @@ export function normalizeUrl(raw: string): string | null {
 }
 
 const URLS_IN_TEXT = /https?:\/\/[^\s<>"'`]+/gi;
+const TRAILING_PUNCTUATION = ".,;:!?)]}*";
 
 /** Every address written in a text, normalized (trailing punctuation dropped). */
 export function urlsIn(text: string): string[] {
   const out: string[] = [];
   for (const m of text.matchAll(URLS_IN_TEXT)) {
-    const n = normalizeUrl(m[0].replace(/[.,;:!?)\]}*]+$/, ""));
+    // A walk back, not `/[…]+$/`: that pattern is quadratic on a long run of punctuation that does not end the text.
+    let end = m[0].length;
+    while (end > 0 && TRAILING_PUNCTUATION.includes(m[0][end - 1] as string)) end--;
+    const n = normalizeUrl(m[0].slice(0, end));
     if (n) out.push(n);
   }
   return out;

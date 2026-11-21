@@ -1,10 +1,11 @@
 import type { ConfigContext, ExpoConfig } from "expo/config";
+import versions from "./versions.json";
 
 /**
  * The app's Expo config. Builds: the "Android build" and "iOS build" workflows on GitHub Actions, or EAS (see
  * README.md). The native projects are made from this file by `expo prebuild` and never committed.
  * - `EXPO_PUBLIC_API_URL`: the server the app talks to by default (production); people can pick their own.
- * - `EAS_PROJECT_ID`: overrides the EAS project (the iPhone's Expo push tokens need it); defaults to ours on expo.dev.
+ * - `EAS_PROJECT_ID`: overrides the EAS project, for those who build with EAS; defaults to ours on expo.dev.
  * - `APP_VARIANT`: "development" | "preview" | "production" (from eas.json or the workflow), so the three install
  *   side by side.
  * - `GOOGLE_SERVICES_JSON`: path to Firebase's google-services.json, for push on Android (FCM).
@@ -12,11 +13,19 @@ import type { ConfigContext, ExpoConfig } from "expo/config";
  * - `APPLE_TEAM_ID`: the Apple team that signs the iOS app and its share extension (a build setting, never in the
  *   repo).
  * - `IOS_BUILD_NUMBER`: the build's number on iOS, set by the iOS workflow.
+ * - `APP_PLATFORM`: "ios" | "android", set by each build workflow (EAS says it in `EAS_BUILD_PLATFORM`): which of the
+ *   two versions in versions.json the build takes.
  *
  * The New Architecture is the only one since SDK 55, so there is no `newArchEnabled` flag any more
  * (the SDK 58 config type no longer has it). Edge-to-edge on Android is likewise always on.
  */
 const variant = process.env.APP_VARIANT ?? "production";
+/**
+ * The app's version in each store, raised on its own by that store's build workflow (ios.yml, android.yml: `release` =
+ * fix/feature/major, as the desktop app's), so a release of one never moves the other's.
+ */
+const platform = process.env.APP_PLATFORM ?? process.env.EAS_BUILD_PLATFORM;
+const version = platform === "android" ? versions.android : versions.ios;
 const suffix = variant === "production" ? "" : `.${variant}`;
 // A fork ships under its own name and package (TRADEMARKS.md: not `chat.agentes.*`): its build sets these.
 const appName = process.env.APP_NAME ?? (variant === "production" ? "agentes" : `agentes ${variant}`);
@@ -54,6 +63,7 @@ export const APP_LINK_PATTERNS = [
   "/org/*/routines",
   "/org/*/search",
   "/org/*/drive",
+  "/org/*/drive/*",
   "/org/*/wiki",
   "/org/*/wiki/*",
   "/org/*/members",
@@ -63,6 +73,7 @@ export const APP_LINK_PATTERNS = [
   "/org/*/settings/apps",
   "/org/*/settings/general",
   "/org/*/settings/members",
+  "/org/*/settings/invites",
   "/org/*/settings/audit",
   "/org/*/settings/access",
   "/org/*/settings/connectors",
@@ -104,12 +115,13 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   name: appName,
   slug: "agentes",
   scheme: "agenteschat",
-  version: process.env.APP_VERSION ?? "0.1.0",
+  version: process.env.APP_VERSION ?? version,
   // Upright everywhere (the plugin below); only the agent's screen, in control, lies down (`useSideways`).
   orientation: "default",
-  // The icon the app ships with (ADR 0179); the others a person may pick are added by ./plugins/with-app-icons.
-  // All of them come from packages/ui/scripts/app-icons.mjs.
-  icon: `${ICONS}/night/ios.png`,
+  // The icon the app ships with (ADR 0179): the agent leaning in, Espiando, on the night sky (packages/client's
+  // `PHONE_APP_ICON`); the others a person may pick are added by ./plugins/with-app-icons. All of them come from
+  // packages/ui/scripts/app-icons.mjs.
+  icon: `${ICONS}/peekNight/ios.png`,
   userInterfaceStyle: "automatic",
   ios: {
     bundleIdentifier: appId,
@@ -117,9 +129,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     ...(process.env.IOS_BUILD_NUMBER ? { buildNumber: process.env.IOS_BUILD_NUMBER } : {}),
     // Light, dark and tinted (iOS 18).
     icon: {
-      light: `${ICONS}/night/ios.png`,
-      dark: `${ICONS}/night/ios-dark.png`,
-      tinted: `${ICONS}/night/ios-tinted.png`,
+      light: `${ICONS}/peekNight/ios.png`,
+      dark: `${ICONS}/peekNight/ios-dark.png`,
+      tinted: `${ICONS}/peekNight/ios-tinted.png`,
     },
     supportsTablet: false,
     usesAppleSignIn: true,
@@ -208,6 +220,10 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       },
     ],
     [
+      // Pushes come straight from Firebase and from Apple with the system's own token (ADR 0152, ADR 0178). The
+      // plugin's `aps-environment` entitlement stays as it is: the profile that signs an iPhone build decides which
+      // of Apple's push environments its tokens belong to (a store build's is production), and the app reads that
+      // from the profile when it registers (src/lib/push.ts).
       "expo-notifications",
       {
         icon: "./assets/images/notification-icon.png",
@@ -242,13 +258,21 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         enableBackgroundPlayback: false,
       },
     ],
+    // The agents at work in the Dynamic Island and on the Lock Screen (ADR 0210): a widget extension
+    // (`<bundle id>.ExpoWidgetsTarget`, in the app group `group.<bundle id>`) for the Live Activity the server starts,
+    // updates and ends by push; `frequentUpdates` lets those pushes come as often as an agent moves on.
+    ["expo-widgets", { enablePushNotifications: true, frequentUpdates: true }],
+    // The share extension reads as the app in the share sheet. Before expo-share-intent, so it runs once the
+    // extension's files are written (a project's changes run from the last plugin to the first).
+    "./plugins/with-share-extension-name",
     [
       // "Compartilhar com…": the app in the system's share sheet (an iOS share extension and Android's send intents),
       // for photos, videos, files, links and text; what arrives opens the agent picker (src/features/share). The
-      // extension takes the app's name and shares its URL scheme; it reaches phones only with a new native build.
+      // extension shares the app's URL scheme; it reaches phones only with a new native build. No
+      // `iosShareExtensionName`: it also names the extension's Xcode target, and the app's name there is the app's
+      // own target, so the extension was never made (plugins/with-share-extension-name.js gives it its name).
       "expo-share-intent",
       {
-        iosShareExtensionName: variant === "production" ? "agentes" : `agentes ${variant}`,
         iosActivationRules: {
           NSExtensionActivationSupportsText: true,
           NSExtensionActivationSupportsWebURLWithMaxCount: 1,

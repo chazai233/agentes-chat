@@ -12,6 +12,7 @@ import {
   createAgent,
   createAgentRuns,
   createChannel,
+  type createFakeJudge,
   createJobHandlers,
   createPassToolSource,
   drainOutbox,
@@ -22,7 +23,6 @@ import {
   issueRunToolToken,
   LONG_JOB_KINDS,
   type MachineStatus,
-  mayFallBack,
   openDm,
   postPauseCards,
   queueOnRun,
@@ -226,6 +226,17 @@ describe("a routine's background run never posts by itself", () => {
     expect(await agentMessages()).toEqual([]);
     expect(ends()).toEqual([{ runId: run.id, status: "done", text: "Nada novo desde ontem." }]);
     expect(await routineRunById(routineRun.id)).toMatchObject({ status: "silent", summary: "Nada novo desde ontem." });
+  });
+
+  test("a silent run picks no line: its routine's line shows", async () => {
+    f = await setup({ reply: () => ({ chunks: ["Nada novo desde ontem."] }) });
+    const judge = f.context.judge as ReturnType<typeof createFakeJudge>;
+    await backgroundRun();
+    await drainOutbox(f.db, f.handlers);
+    expect(judge.calls.map((c) => c.kind)).not.toContain("agent_status");
+    expect((await f.db.select().from(schema.agents).where(eq(schema.agents.id, f.agent.id)))[0]?.statusKind).toBe(
+      "routine",
+    );
   });
 
   test("a failure: nothing posted, the ledger fails with the run's error code", async () => {
@@ -532,7 +543,7 @@ describe("the brain a run thinks with", () => {
     expect((await routineRunById(routineRun.id))?.brain).toBe("claude_code");
   });
 
-  test("a conversation run stores its brain, and the model when it falls back", async () => {
+  test("a conversation run stores its brain, and waits on it at its plan's limit", async () => {
     f = await setup({ reply: () => ({ chunks: ["Respondi pela API."] }) });
     await computerAgent();
     const { brain } = scriptedBrain(async function* () {
@@ -552,20 +563,18 @@ describe("the brain a run thinks with", () => {
     const [run] = await f.db.transaction((tx) => createAgentRuns(tx, ask, [f.agent.id], "mention"));
     await drainOutbox(f.db, handlers);
 
+    // The API never stands in: the run keeps its brain and waits for the plan.
     const after = await runById(run?.id ?? "");
-    expect(after).toMatchObject({ status: "done", brain: "model" });
+    expect(after).toMatchObject({ status: "waiting_input", brain: "claude_code" });
+    expect(f.provider.calls).toHaveLength(0);
     const [agent] = await f.db.select().from(schema.agents).where(eq(schema.agents.id, f.agent.id));
-    expect(agent?.brain).toBe("claude_code");
-    expect(runBrainOf(after ?? {}, agent)).toBe("model");
+    expect(runBrainOf(after ?? {}, agent)).toBe("claude_code");
   });
 
-  test("runBrainOf and mayFallBack", () => {
+  test("runBrainOf", () => {
     expect(runBrainOf({ brain: "model" }, { brain: "claude_code" })).toBe("model");
     expect(runBrainOf({ brain: null }, { brain: "codex" })).toBe("codex");
     expect(runBrainOf({ brain: "something" }, null)).toBe("model");
-    expect(mayFallBack({ brainFallback: true }, { background: false })).toBe(true);
-    expect(mayFallBack({ brainFallback: true }, { background: true })).toBe(false);
-    expect(mayFallBack({ brainFallback: false }, { background: false })).toBe(false);
   });
 });
 

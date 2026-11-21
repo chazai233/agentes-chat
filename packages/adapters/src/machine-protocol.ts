@@ -7,7 +7,7 @@ import type { MergeDone } from "./command-policy";
  */
 
 /** Bumped on breaking changes; the server refuses runners older than `MIN_RUNNER_PROTOCOL`. */
-export const MACHINE_PROTOCOL_VERSION = 64;
+export const MACHINE_PROTOCOL_VERSION = 75;
 export const MIN_RUNNER_PROTOCOL = 1;
 /** From this protocol on, requests carry `agent` and each agent works in its own folder. */
 export const AGENT_FOLDERS_PROTOCOL = 2;
@@ -290,6 +290,8 @@ export interface MachineSize {
   memoryGb: number;
   diskGb: number;
   limit?: { cpus: number; memoryGb: number };
+  /** `TASK_LIMIT_PROTOCOL`: the background tasks it runs at once. */
+  maxTasks?: number;
 }
 
 /**
@@ -663,6 +665,91 @@ export const XCODE_FIX_PROTOCOL = 62;
  * Older runners answer `bad_request`: the server asks none of them.
  */
 export const ACCESS_ALLOW_PROTOCOL = 62;
+/**
+ * The iPhone guide's Developer Mode step: `phone.look` on a Mac reads its iPhones again before it answers (one turned
+ * on the mode, or came back from its restart), and `xcode.open` opens Xcode there, which shows the Developer Mode
+ * switch on a plugged iPhone that hides it. Older runners answer `phone.look` at once and `xcode.open` `bad_request`.
+ */
+export const IPHONE_DEV_MODE_PROTOCOL = 65;
+/**
+ * From this protocol on, in system mode a Grok Build sign-in is made for all of its owner's agents there too
+ * (`begin`'s `shared` for `grok`): root's `GROK_HOME` keeps the sign-in (`auth.json`, never lent) and each agent's
+ * turn gets a copy in its own folder for the account (`grok_auth` grant), a copy its Grok refreshed going back to
+ * root (`grok.auth`). An older runner lends the account's folder to one agent, so the server reads it as one login
+ * per agent, as before.
+ */
+export const SHARED_GROK_PROTOCOL = 67;
+/**
+ * From this protocol on, Gemini accounts sign in and think on macOS too, each in a keychain of its own inside its
+ * folder (ADR 0143). An older Mac runner refuses them, so the server reads it as too old for the Antigravity CLI.
+ */
+export const ANTIGRAVITY_MAC_PROTOCOL = 68;
+/**
+ * `phone.repair`: a Mac repairs a real iPhone's test helper (stops it and its leftovers, builds it again with the Xcode
+ * installed now, checks it on the phone). Older runners answer `bad_request`: the server asks none of them.
+ */
+export const PHONE_REPAIR_PROTOCOL = 73;
+/**
+ * From this protocol on, the runner sends `room.freed` once there is room again after it refused a turn (`no_slot`): a
+ * turn ended there, or its memory came back over the agents' floor. The server asks its line again at once; an older
+ * runner's line asks again on its timer.
+ */
+export const ROOM_FREED_PROTOCOL = 69;
+
+/**
+ * `clis.check`: the coding CLIs looked up again now, the PATH read again first (the apps' "I installed it, check again").
+ * `cli.install`: the person who paired the computer installs a coding CLI there from the apps, through its vendor's
+ * official installer, run as that person. The server sends a program id from `INSTALLABLE_CLIS`, never a command: the
+ * runner holds the installers. Older runners answer `bad_request`: the server asks none of them.
+ */
+export const CLI_INSTALL_PROTOCOL = 66;
+/**
+ * `report.collect`: the facts and the scrubbed end of its log a computer adds to a problem report someone chose to
+ * send. The server asks no older runner, and says in the report that its log is missing.
+ */
+export const PROBLEM_REPORT_PROTOCOL = 72;
+/** Lines of the runner's log `report.collect` gives, at most. */
+export const REPORT_LOG_LINES = 300;
+
+/** What `report.collect` answers: no paths, names or addresses (the log tail is scrubbed on the computer). */
+export interface RunnerReportParts {
+  runner: string;
+  protocol: number;
+  runtime: string;
+  os: string;
+  arch: string;
+  compiled: boolean;
+  managedBy: string;
+  connection: string;
+  paused: boolean;
+  tools: Record<string, boolean>;
+  executors: { claude?: string; codex?: string; claudeLoggedIn?: boolean };
+  agents: number;
+  runningNow: number;
+  browser?: { state: string; chrome?: string; lastError?: string };
+  logTail: string[];
+}
+
+/** The coding CLIs `cli.install` installs: Claude Code and Codex. */
+export const INSTALLABLE_CLIS = ["claude", "codex"] as const;
+export type InstallableCli = (typeof INSTALLABLE_CLIS)[number];
+export const isInstallableCli = (v: unknown): v is InstallableCli =>
+  (INSTALLABLE_CLIS as readonly unknown[]).includes(v);
+export const CLI_INSTALL_STATES = ["running", "done", "failed", "canceled", "unsupported"] as const;
+/** Why an install failed before or after its installer ran, as a code the apps word (`message` has the rest). */
+export const CLI_INSTALL_CAUSES = ["git_missing", "still_missing"] as const;
+/**
+ * Where an install stands: `running`, `done` (the look after it found the CLI), `failed` (`message`: the installer's
+ * own last line; `cause`: `git_missing`, Claude Code on Windows without Git for Windows, so nothing was installed, or
+ * `still_missing`, the installer ended well and the look after it still doesn't find the CLI), `canceled`,
+ * `unsupported` (this runner can't: system mode, a system it has no installer for).
+ */
+export interface CliInstall {
+  tool: InstallableCli;
+  state: (typeof CLI_INSTALL_STATES)[number];
+  message?: string;
+  cause?: (typeof CLI_INSTALL_CAUSES)[number];
+}
 
 export type PhonePlatform = "android" | "ios";
 export type PhoneKind = "device" | "emulator" | "simulator";
@@ -683,6 +770,8 @@ export type PhoneReason =
   /** iPhone: no Xcode on the Mac, or its iPhone SDK is older than the phone's iOS (`xcode_too_old`). */
   | "xcode_missing"
   | "xcode_too_old"
+  /** iPhone: its iOS is older than the Mac's iPhone SDK and the test helper is stuck: the iPhone needs an update. */
+  | "ios_behind_xcode"
   /** iPhone: the Mac is preparing the phone (device support download, needs internet). */
   | "device_support"
   /** iPhone: the test helper isn't built yet, or its free signature ran out (`helper_expired`). */
@@ -1125,6 +1214,11 @@ export interface PlanWindow {
   label?: string;
   usedPercent: number;
   resetsAt?: string;
+  /**
+   * When this window was last read, where that is before its snapshot's `at`: a turn's event that didn't name it
+   * kept the older reading. Absent: the snapshot's `at`.
+   */
+  at?: string;
 }
 export type PlanWindowKind = "five_hour" | "seven_day" | "seven_day_opus" | "seven_day_sonnet" | "monthly" | "other";
 export const PLAN_WINDOW_KINDS: readonly PlanWindowKind[] = [
@@ -1143,7 +1237,10 @@ export interface PlanUsage {
   limited?: boolean;
   source: "turn" | "probe";
   at: string;
-  /** Server side only: the models at a limit of their own (`PlanModelLimit`), by model id. */
+  /**
+   * The models at a limit of their own (`PlanModelLimit`), by model id: the usage views show it to people, and the
+   * engine uses it so "Automático" and its own turns don't pick an exhausted model (never a switch on its own).
+   */
   models?: Record<string, PlanModelLimit>;
   /** Server side only, on a plan whose models have their own limits: the model that last answered with this key. */
   answered?: string;
@@ -1207,6 +1304,8 @@ export const ACCOUNT_LOGIN_FAILURES = [
   "no_token",
   /** It signed in, but the computer couldn't keep the sign-in. */
   "not_kept",
+  /** Grok Build signed in, but its sandbox doesn't start there for an agent's user (bubblewrap's words in `message`). */
+  "sandbox",
   /** Nobody finished it within `ACCOUNT_LOGIN_TTL_MS` (`expired`). */
   "timeout",
   /** The person canceled it. */
@@ -1282,16 +1381,16 @@ export const isLoginEmail = (v: unknown): v is string =>
   /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}@[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)+$/.test(v);
 
 /** The `agent-browser` release the runner and the desktop app ship (ADR 0040 §2). */
-export const AGENT_BROWSER_VERSION = "0.39.1";
+export const AGENT_BROWSER_VERSION = "0.42.0";
 /** Targets of `agent-browser`'s release assets (`agent-browser-<target>`, `.exe` on Windows). */
 export type AgentBrowserTarget = "darwin-arm64" | "darwin-x64" | "linux-arm64" | "linux-x64" | "win32-x64";
 /** SHA-256 (hex) of each release asset of `AGENT_BROWSER_VERSION`, checked before the binary is used. */
 export const AGENT_BROWSER_SHA256: Record<AgentBrowserTarget, string> = {
-  "darwin-arm64": "cc18fac41d9dc9821918340a136e643286ea05544c4dd35671b796f1a874cdef",
-  "darwin-x64": "339cb9aa6dfd404856cf938df34cd3b4779c61dfd57fc257be11b14fd1a885f9",
-  "linux-arm64": "9d8fdc586056df65747927ae166157c83af91b52cea287175e5544afd2591d33",
-  "linux-x64": "6906d3a2a67b05809932a93d99e53d1132373f0a52a617b2d6032dbb954df6fc",
-  "win32-x64": "af1ff5f2afd5c187fb50ac3bbc1e7114baadc180d67cef63f644af9031be5049",
+  "darwin-arm64": "b1b2946c95d218b035262483f2c6193e0f216c155c903bcc532ce47e29d8e72d",
+  "darwin-x64": "802883bc38519e550525f74bb3e7ca692029082bdd2b7c235c26167b130c8d66",
+  "linux-arm64": "a219b10251ecd85e5787d1126dc969d926ac8d2dea325f9d94413907a8856f40",
+  "linux-x64": "b69e0f5ea76dcb51f8f75da6bcb87c7f4d81f79b5738f1f08bd121b51cb3dc57",
+  "win32-x64": "8209f42e604d012f789caa14ae73a57200925608409fa09427b0fd6e4f3adf15",
 };
 /** `darwin-arm64` → `agent-browser-darwin-arm64`; `win32-x64` → `agent-browser-win32-x64.exe`. */
 export const agentBrowserAsset = (target: AgentBrowserTarget) =>
@@ -1317,6 +1416,42 @@ export const BROWSER_LIMITS = {
   title: 300,
   message: 500,
 } as const;
+
+/**
+ * The agent's tabs after a `browser.act` or `browser.batch`: how many, the first `BROWSER_TABS_LISTED` most recently
+ * used first (titles are the sites': data, never instructions), which one its commands act on, and the hosts of the
+ * tabs its runner closed to keep them tidy since the agent last heard ("blank" for an empty tab). An older runner sends
+ * none, and the agent is told nothing.
+ */
+export interface BrowserTabs {
+  count: number;
+  open: { title: string; host: string; current?: boolean }[];
+  closed?: string[];
+}
+export const BROWSER_TABS_LISTED = 12;
+/** At most this many tabs stay open in an agent's Chrome: past it the runner closes the least recently used. */
+export const BROWSER_TABS_KEPT = 8;
+
+/** A reply's `tabs`, checked; undefined when there is none or it isn't one. */
+export function browserTabsOf(v: unknown): BrowserTabs | undefined {
+  if (!isObject(v) || !Number.isInteger(v.count) || !Array.isArray(v.open)) return undefined;
+  const text = (x: unknown, max: number) => (typeof x === "string" ? x.slice(0, max) : "");
+  const open = v.open
+    .slice(0, BROWSER_TABS_LISTED)
+    .filter(isObject)
+    .map((t) => ({
+      title: text(t.title, BROWSER_LIMITS.title),
+      host: text(t.host, 255),
+      ...(t.current === true ? { current: true } : {}),
+    }));
+  const closed = Array.isArray(v.closed)
+    ? v.closed
+        .slice(0, 50)
+        .map((h) => text(h, 255))
+        .filter(Boolean)
+    : [];
+  return { count: Math.max(open.length, v.count as number), open, ...(closed.length > 0 ? { closed } : {}) };
+}
 
 /** Where people get Google Chrome, which agents' browsers run on (ADR 0133). */
 export const CHROME_DOWNLOAD_URL = "https://www.google.com/chrome/";
@@ -1363,6 +1498,40 @@ export const CHROME_FAILURES = {
 } as const;
 
 export type ChromeFailure = "missing" | "start" | "profile" | "outdated";
+/** The way out of a Chrome that closed as it started for no cause we know. */
+const UPDATE_CHROME =
+  "Update Google Chrome on it (open Chrome, then Settings › About Chrome, and Relaunch), then try again.";
+
+/**
+ * How a Chrome that closed while starting exited, for logs and people: its exit code (in hex too on Windows, whose
+ * codes are often NTSTATUS values) or the signal that ended it.
+ */
+export function chromeExitText(code: number | null, signal: string | null, platform: string = process.platform) {
+  if (code === null) return signal ? `signal ${signal}` : "no exit code";
+  const n = platform === "win32" ? code >>> 0 : code;
+  return platform === "win32" ? `exit 0x${n.toString(16).toUpperCase()}/${n}` : `exit ${n}`;
+}
+
+/**
+ * What follows `CHROME_FAILURES.start` when Chrome closed while starting: the cause, when its exit code is one we
+ * know, and one way out. 21 (a profile in use) is `CHROME_FAILURES.profile` instead.
+ */
+export function chromeExitCause(code: number | null, signal: string | null, platform: string = process.platform) {
+  const exit = chromeExitText(code, signal, platform);
+  switch (code === null ? null : code >>> 0) {
+    // chrome_result_codes.h: RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED, handed to a Chrome already on the profile.
+    case 24:
+      return `Another Google Chrome already running with the agent's profile took over its start (${exit}). Try again in a minute.`;
+    // NTSTATUS STATUS_DLL_NOT_FOUND.
+    case 0xc0000135:
+      return `A file Google Chrome needs is missing (${exit}). Reinstall Google Chrome from google.com/chrome, then try again.`;
+    // NTSTATUS STATUS_ACCESS_VIOLATION.
+    case 0xc0000005:
+      return `Google Chrome crashed as it started (${exit}). ${UPDATE_CHROME}`;
+    default:
+      return `Google Chrome closed as it started (${exit}). ${UPDATE_CHROME}`;
+  }
+}
 
 /** Which of `CHROME_FAILURES` a runner's message is, or null for another one (an older runner's, a busy computer). */
 export function chromeFailureKind(message: string): ChromeFailure | null {
@@ -1590,6 +1759,31 @@ export type BrowserInputEvent =
   /** Whole text into the focused field (CDP `Input.insertText`): accents, paste, the app's own text field. */
   | { kind: "text"; text: string };
 
+/** What the agent's pointer does where it arrives: `type` stays there while the keys go in. */
+export const AGENT_POINTER_ACTS = ["move", "click", "double", "type"] as const;
+export type AgentPointerAct = (typeof AGENT_POINTER_ACTS)[number];
+
+/** A point the agent's pointer goes to, in the pixels of a surface `width`×`height` (the page's viewport). */
+export interface AgentPointer {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  act: AgentPointerAct;
+}
+
+/** An `AgentPointer` out of a frame: a point inside a surface of a sane size, or null. */
+export function parseAgentPointer(f: Record<string, unknown>): AgentPointer | null {
+  const [x, y, width, height] = [f.x, f.y, f.width, f.height].map((n) =>
+    typeof n === "number" && Number.isFinite(n) ? n : undefined,
+  );
+  const act = AGENT_POINTER_ACTS.find((a) => a === f.act);
+  if (x === undefined || y === undefined || width === undefined || height === undefined || !act) return null;
+  if (width < 1 || height < 1 || width > 16_384 || height > 16_384) return null;
+  const within = (n: number, max: number) => Math.round(Math.min(Math.max(n, 0), max));
+  return { x: within(x, width), y: within(y, height), width: Math.round(width), height: Math.round(height), act };
+}
+
 /** What a frame shows. */
 export interface BrowserFrameMetadata {
   deviceWidth: number;
@@ -1719,6 +1913,17 @@ export interface GitSyncRepo {
 export const HELLO_TIMEOUT_MS = 10_000;
 /** The server pings this often; the runner reconnects after two missed pings. */
 export const HEARTBEAT_MS = 25_000;
+/** Close codes the server sends the runner. */
+export const MACHINE_CLOSE = {
+  badFrame: 4400,
+  invalidToken: 4401,
+  revoked: 4403,
+  timeout: 4408,
+  replaced: 4409,
+  outdated: 4426,
+} as const;
+/** The close code a runner sends when it stops for good (its service stopped, the app quit), not a lost link. */
+export const RUNNER_STOPPED_CLOSE = 4000;
 /** Largest text frame either side accepts (a `write` of 5 MB is about 6.7 MB in base64). */
 export const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 /** `read`/`write` bodies (base64 in JSON); larger files go through `push` and `pull`. */
@@ -1850,10 +2055,16 @@ export interface TaskStart {
   model?: string;
 }
 
+/** The coding CLIs `hello.executors` reports. */
+export const CLI_NAMES = ["claude", "codex", "cursor", "opencode", "grok", "antigravity"] as const;
+export type CliName = (typeof CLI_NAMES)[number];
+
 /** A coding CLI on the machine, as `hello` reports it (protocol 7). */
 export interface RunnerExecutorInfo {
-  /** The first line of `<cli> --version`. */
+  /** The line of `<cli> --version` that holds its version (else its first line, or `unknown`). */
   version: string;
+  /** `codex` only: the copy the runner starts, the newest of those it found. */
+  path?: string;
   /** Protocol 8, `claude` only: `claude auth status` says it is logged in (absent: unknown). */
   loggedIn?: boolean;
   /** Protocol 8, `claude` only: how it is logged in (`claude.ai`, `api_key`…) and the plan (`pro`, `max`, `ultra`…). */
@@ -1882,13 +2093,34 @@ export const CURSOR_MODEL_LIMITS = { models: 60, id: 80, label: 80 } as const;
 
 /**
  * How a brain turn started on the runner (Claude Code; an older runner leaves it out): on a process already open
- * (`warm`), how long a new one took to say it was ready (`initMs`), and the first event after the turn began.
+ * (`warm`), how long a new one took to say it was ready (`initMs`), and the first event after the turn began. A newer
+ * runner adds where the model's own time went: the API's first streamed message (`firstTokenMs`) and the first whole
+ * block of the answer (`firstAssistantMs`) from the turn's start, the CLI's API retries and the waits they announced,
+ * and the thinking blocks with the characters of their text (0 when the API leaves the text out).
  */
 export interface BrainTurnTimings {
   warm: boolean;
   initMs?: number;
   firstEventMs?: number;
+  firstTokenMs?: number;
+  firstAssistantMs?: number;
+  retries?: number;
+  retryDelayMs?: number;
+  thinkingBlocks?: number;
+  thinkingChars?: number;
 }
+
+/** The measures of `BrainTurnTimings` past `warm`, each a whole number from 0 up to a day. */
+export const BRAIN_TURN_MEASURES = [
+  "initMs",
+  "firstEventMs",
+  "firstTokenMs",
+  "firstAssistantMs",
+  "retries",
+  "retryDelayMs",
+  "thinkingBlocks",
+  "thinkingChars",
+] as const;
 
 /**
  * One event of a brain turn on the wire (`brain.event`), the same shape as
@@ -1913,9 +2145,16 @@ export type WireBrainEvent =
       model?: string;
       cacheRead?: number;
       cacheWrite?: number;
-      /** Claude Code: the API calls the turn made (`num_turns`), and the most uncached input one of them read. */
+      /**
+       * The API calls the turn made (Claude Code's `num_turns`, Codex's model requests), the most uncached input one of
+       * them read (Claude Code), and the most input one read, cache included: its context at that step. An older
+       * runner sends none. `lastContext`: what the turn's last call read, cache included, the session's size as it
+       * ends (an older runner sends none: the engine takes the biggest call, else the turn's input over `calls`).
+       */
       calls?: number;
       maxUncached?: number;
+      maxContext?: number;
+      lastContext?: number;
     }
   | { type: "limit"; resetsAt?: string }
   | { type: "done"; text: string; session?: { id: string }; timings?: BrainTurnTimings }
@@ -1935,6 +2174,11 @@ export type WireBrainEvent =
     }
   /** Protocol 15: messages handed with `brain.steer` that the turn read (their `uuid`s). */
   | { type: "steer_read"; uuids: string[] }
+  /**
+   * An answer the turn finished before it went on (`BrainTurnRequest.answers`): the server posts it as a message of its
+   * own now; `done` holds only what came after it. Sent only to a request that asked for it.
+   */
+  | { type: "answer"; text: string }
   /** Protocol 46: Fast failed (`message`: the provider's words) and this turn answered at standard speed. */
   | { type: "speed_fallback"; message: string }
   /** A call the brain starts on its own (Claude Code's Read, Bash, Task): its `tool_call` follows once it ended. */
@@ -1943,7 +2187,25 @@ export type WireBrainEvent =
    * A file a tool of the brain's own made (Codex's image generation), kept in the agent's folder (`path`, relative
    * to it): the server sends it to the Drive and its card goes with the reply. An older server drops the event.
    */
-  | { type: "file"; path: string };
+  | { type: "file"; path: string }
+  /**
+   * The CLI printed nothing for longer than the phase it was in allows, and the runner stopped it (Claude Code,
+   * `brain-silence.ts`): waiting for the `model`, while it was `compacting`, or in one of its own tools (`tool`, the
+   * tool's name, `label` what it ran on, masked). `resumed`: the same turn goes on in a resumed session; else the turn
+   * ends (`brain_stalled`). An older server drops the event.
+   */
+  | {
+      type: "stalled";
+      phase: BrainStallPhase;
+      tool?: string;
+      label?: string;
+      silentMs: number;
+      resumed: boolean;
+    };
+
+/** Where a stalled brain turn was (`stalled`). */
+export const BRAIN_STALL_PHASES = ["model", "compacting", "tool"] as const;
+export type BrainStallPhase = (typeof BRAIN_STALL_PHASES)[number];
 
 /**
  * `brain.steer` (protocol 15): messages for the turn of `runId` in progress.
@@ -2042,6 +2304,12 @@ export interface BrainTurnRequest {
    * (`PERSON_TURN_MIN_FREE_BYTES`). No protocol step: a runner that doesn't read it admits the turn like any other.
    */
   personWaiting?: boolean;
+  /**
+   * `each` (ADR 0112): an answer the turn finished before it went on (a message handed to it mid-turn was read after
+   * it, work moved to the background, a background task's notice) goes out at once as an `answer` event, and `done`
+   * holds only what came after it. No protocol step: a runner that doesn't read it joins them into `done`, as before.
+   */
+  answers?: "each";
 }
 
 /**
@@ -2073,6 +2341,35 @@ export const ROUTE_PROTOCOL = 24;
 export const ROUTE_TIMEOUT_MS = 30_000;
 /** Largest `brain.route` fields (characters; the schema as JSON). */
 export const ROUTE_LIMITS = { system: 8000, prompt: 32_000, schema: 8000 } as const;
+
+/**
+ * `brain.warm` (protocol 74): the engine claimed a run that will think with Claude Code here, and asks before it builds
+ * the turn's context: the session's CLI starts now (or stays open), with the launch the turn will most likely ask for,
+ * so the turn finds it warm. Best effort: the runner may decline (no room, nothing to start it with) and the turn
+ * starts its CLI as before; a turn whose launch differs starts its own. The server sends it to no older runner.
+ */
+export const BRAIN_WARM_PROTOCOL = 74;
+
+/**
+ * Background tasks at once, from the apps (protocol 75): `hello.size.maxTasks` and `runner.state.maxTasks` say the
+ * computer's limit, and `limits.set` changes it as its owner asked. An older runner says none: it runs 3, its old
+ * default, unless its config says otherwise.
+ */
+export const TASK_LIMIT_PROTOCOL = 75;
+/** The tasks a computer may run at once (`maxConcurrentTasks` in the runner's config). */
+export const TASK_LIMIT_BOUNDS = [1, 20] as const;
+
+/** What `brain.turn` would start its CLI with, without the turn's own words (no prompt, system text or run). */
+export type BrainWarmRequest = Pick<
+  BrainTurnRequest,
+  "kind" | "session" | "cwd" | "model" | "personalMcp" | "permissions" | "account" | "effort" | "contextTokens"
+>;
+
+/** `open`: the session has a CLI now; `started`: this request started it. */
+export interface BrainWarmReply {
+  open: boolean;
+  started: boolean;
+}
 
 /** `brain.route` (protocol 24): one answer in `schema`'s shape from the account's CLI. */
 export interface BrainRouteRequest {
@@ -2286,6 +2583,11 @@ export interface RunnerInfo {
     opencode?: RunnerExecutorInfo;
     grok?: RunnerExecutorInfo;
     antigravity?: RunnerExecutorInfo;
+    /**
+     * `CLI_INSTALL_PROTOCOL`: a CLI that is there and whose `--version` keeps failing, with its own last line of
+     * error. It is not listed above: it can't run turns, and it isn't missing either.
+     */
+    broken?: Partial<Record<CliName, string>>;
   };
   /** Protocol 9: whether the owner paused this computer. */
   paused?: RunnerPause;
@@ -2392,6 +2694,8 @@ export type MachineRequest = (
   | ({ op: "brain.steer" } & BrainSteerRequest)
   /** Protocol 24: a plan picks who answers a message (ADR 0074); the request's agent is the one it is lent to. */
   | ({ op: "brain.route" } & BrainRouteRequest)
+  /** Protocol 74: start (or keep) a session's Claude Code before its turn comes (`BRAIN_WARM_PROTOCOL`). */
+  | ({ op: "brain.warm" } & BrainWarmRequest)
   /** Protocol 11: clone or update the agent's checkouts through our git proxy. */
   | ({ op: "git.sync" } & GitSyncRequest)
   /** Protocol 14: the mission's worktree (ADR 0044). */
@@ -2450,6 +2754,12 @@ export type MachineRequest = (
        * may start Chrome, never while someone watches it or a person's turn is open.
        */
       desktop?: boolean;
+      /**
+       * The person in control sent it (the live view's address field, a restart): it runs while they drive the
+       * browser. Anything else meanwhile never reaches the browser: a read of the address or title is answered from
+       * the live view, the rest is refused (a person's input waits behind whatever the browser is busy with).
+       */
+      person?: boolean;
     }
   /** Protocol 12: close the agent's browser session (Stop, idle). */
   | { op: "browser.stop" }
@@ -2538,10 +2848,13 @@ export type MachineRequest = (
   | { op: "phone.pair.cancel"; pairingId: string }
   /** `REMOTE_PAUSE_PROTOCOL`: pause (until `until`, null: until resumed) or resume, for the person `by`. */
   | { op: "pause.set"; paused: boolean; until?: string | null; by: string }
+  /** `TASK_LIMIT_PROTOCOL`: the background tasks it runs at once, from now on (stored in its config). */
+  | { op: "limits.set"; maxTasks: number }
   /**
    * A phone guide is open and waits for a phone: for the next minute, a Windows runner also looks for a plugged phone
-   * Windows has no USB driver for (adb never lists one) and reports it as `no_driver`. Older runners answer
-   * `bad_request`, which the server ignores.
+   * Windows has no USB driver for (adb never lists one) and reports it as `no_driver`. From `IPHONE_DEV_MODE_PROTOCOL`
+   * a Mac reads its iPhones again and answers once `phones.changed` went out. Older runners answer `bad_request`,
+   * which the server ignores.
    */
   | { op: "phone.look" }
   /**
@@ -2559,6 +2872,16 @@ export type MachineRequest = (
   | { op: "keep.end"; holdId: string; stop?: boolean }
   /** `XCODE_FIX_PROTOCOL`: start a fix (`kind`), or say where the last one stands, or stop it. One at a time. */
   | { op: "xcode.fix"; action: "start" | "status" | "cancel"; kind?: XcodeFixKind }
+  /** `CLI_INSTALL_PROTOCOL`: the PATH and the coding CLIs looked up now; `executors.changed` follows a change. */
+  | { op: "clis.check" }
+  /** `CLI_INSTALL_PROTOCOL`: start an install of `tool`, or say where the last one stands, or stop it. One at a time. */
+  | { op: "cli.install"; action: "start" | "status" | "cancel"; tool?: InstallableCli }
+  /** `IPHONE_DEV_MODE_PROTOCOL`: open Xcode on this Mac (it shows Developer Mode on a plugged iPhone). */
+  | { op: "xcode.open" }
+  /** `PHONE_REPAIR_PROTOCOL`: repair the test helper of the iPhone `serial`; answers once its rebuild started. */
+  | { op: "phone.repair"; serial: string }
+  /** `PROBLEM_REPORT_PROTOCOL`: facts and the scrubbed log tail for a problem report. */
+  | { op: "report.collect" }
 ) & {
   agent?: AgentScope;
   /** Protocol 34: a `browser.*` op in this browser profile's session instead of the agent's (ADR 0110). */
@@ -2592,6 +2915,7 @@ export const MACHINE_OPS: readonly MachineOp[] = [
   "brain.turn",
   "brain.steer",
   "brain.route",
+  "brain.warm",
   "git.sync",
   "mission.worktree",
   "access.request",
@@ -2631,11 +2955,17 @@ export const MACHINE_OPS: readonly MachineOp[] = [
   "phone.pair.status",
   "phone.pair.cancel",
   "pause.set",
+  "limits.set",
   "phone.look",
   "phone.wifi",
   "keep.start",
   "keep.end",
   "xcode.fix",
+  "clis.check",
+  "cli.install",
+  "xcode.open",
+  "phone.repair",
+  "report.collect",
 ];
 
 /** What each op answers with `ok: true`. */
@@ -2700,6 +3030,7 @@ export interface MachineReplies {
   "brain.turn": { runId: string; final: WireBrainEvent };
   "brain.steer": BrainSteerReply;
   "brain.route": BrainRouteReply;
+  "brain.warm": BrainWarmReply;
   "git.sync": { repos: GitSyncRepo[] };
   /** `remove` answers `{ removed }` (`false`: the folder was already gone). */
   "mission.worktree": Partial<MissionWorktreeEnsured> & { removed?: boolean };
@@ -2718,6 +3049,7 @@ export interface MachineReplies {
     setup?: BrowserSetup;
     /** Protocol 52: the page size its browser emulates (`agentes:viewport`) after the command; absent at its own. */
     emulated?: NonNullable<BrowserViewport>;
+    tabs?: BrowserTabs;
   };
   /** `false`: there was no session. */
   "browser.stop": { stopped: boolean };
@@ -2735,6 +3067,7 @@ export interface MachineReplies {
     setup?: BrowserSetup;
     /** As `browser.act`'s, after the batch. */
     emulated?: NonNullable<BrowserViewport>;
+    tabs?: BrowserTabs;
   };
   /** `false`: nothing was started (it runs or starts already, a person has the browser, or no room). */
   "browser.warm": { started: boolean; setup?: BrowserSetup };
@@ -2796,12 +3129,18 @@ export interface MachineReplies {
   "phone.pair.status": PhonePairing;
   "phone.pair.cancel": { canceled: boolean };
   "pause.set": { paused: RunnerPause };
+  "limits.set": { maxTasks: number };
   "phone.look": { looking: boolean };
   "phone.wifi": { available: WifiIphone[] };
   "keep.start": { held: true };
   /** `false`: no such hold lived here. */
   "keep.end": { ended: boolean };
   "xcode.fix": { fix: XcodeFix | null };
+  "clis.check": { executors: NonNullable<RunnerInfo["executors"]> };
+  "cli.install": { install: CliInstall | null };
+  "xcode.open": { opened: boolean };
+  "phone.repair": { repairing: boolean };
+  "report.collect": RunnerReportParts;
 }
 
 /** An element numbered on a `browser.capture` image: its ref and box (CSS pixels). */
@@ -2989,7 +3328,12 @@ export type RunnerFrame =
   /** Protocol 8: a `brain.turn` sent its last event. */
   | { type: "brain.done"; runId: string }
   /** Protocol 9: the pause state changed on the machine (paused, resumed, new `until`). */
-  | { type: "runner.state"; paused: RunnerPause }
+  | {
+      type: "runner.state";
+      paused: RunnerPause;
+      /** `TASK_LIMIT_PROTOCOL`: the tasks it runs at once, sent when that changed on the computer. */
+      maxTasks?: number;
+    }
   /** Protocol 10: what the machine allows changed (the person granted, removed, or turned a tool on or off). */
   | { type: "access.changed"; access: RunnerAccess }
   /**
@@ -3018,8 +3362,17 @@ export type RunnerFrame =
   | { type: "browser.frame"; agentId: string; seq: number; data: string; metadata: BrowserFrameMetadata }
   /** Protocol 12: an agent's stream stopped on the machine (asked, session closed, error). */
   | { type: "browser.stream.ended"; agentId: string; reason: "stopped" | "closed" | "error"; message?: string }
+  /**
+   * Where the agent's pointer goes on its browser's page, said as the gesture starts so whoever watches sees it
+   * arrive before the page changes (ADR 0040 §7.2). An older server drops it: nothing asks for it.
+   */
+  | ({ type: "browser.pointer"; agentId: string } & AgentPointer)
+  /** The same on the agent's desktop (ADR 0062), in the screen's pixels: desktop use, and its browser's window there. */
+  | ({ type: "desktop.pointer"; agentId: string } & AgentPointer)
   /** `KEEP_RUNNING_PROTOCOL`: a hold ended on the computer by itself (the next `hello` says so again). */
-  | { type: "keep.ended"; holdId: string; reason: HoldEnd };
+  | { type: "keep.ended"; holdId: string; reason: HoldEnd }
+  /** `ROOM_FREED_PROTOCOL`: room again after a `no_slot`. */
+  | { type: "room.freed" };
 
 /** A tool as `mcp.tools` lists it (what MCP `tools/list` returns). */
 export interface McpToolInfo {
@@ -3217,17 +3570,22 @@ export function parseCursorModels(v: unknown): CursorModelInfo[] {
   return out;
 }
 
-/** `hello.executors`: only `claude`, `codex`, `cursor`, `opencode`, `grok` and `antigravity`, each with a short version line (and Claude Code's login). */
+/**
+ * `hello.executors`: only `claude`, `codex`, `cursor`, `opencode`, `grok` and `antigravity`, each with a short version
+ * line (and Claude Code's login), and `broken`: the error line of each of them that is there and can't start.
+ */
 export function parseExecutors(v: Record<string, unknown>): NonNullable<RunnerInfo["executors"]> {
   const out: NonNullable<RunnerInfo["executors"]> = {};
   const word = (x: unknown) => (isString(x) && /^[\w.-]{1,40}$/.test(x) ? x : undefined);
-  for (const name of ["claude", "codex", "cursor", "opencode", "grok", "antigravity"] as const) {
+  for (const name of CLI_NAMES) {
     const e = v[name];
     if (!isObject(e) || !isString(e.version)) continue;
     const authMethod = word(e.authMethod);
     const plan = word(e.plan);
+    const path = name === "codex" && isString(e.path) && /^[^\0\r\n]{1,500}$/.test(e.path) ? e.path : undefined;
     out[name] = {
       version: e.version.replace(/\s+/g, " ").trim().slice(0, 80),
+      ...(path ? { path } : {}),
       ...(typeof e.loggedIn === "boolean" ? { loggedIn: e.loggedIn } : {}),
       ...(authMethod ? { authMethod } : {}),
       ...(plan ? { plan } : {}),
@@ -3235,8 +3593,21 @@ export function parseExecutors(v: Record<string, unknown>): NonNullable<RunnerIn
     const models = name === "claude" || name === "codex" ? [] : parseCursorModels(e.models);
     if (models.length) out[name] = { ...out[name], models } as RunnerExecutorInfo;
   }
+  if (isObject(v.broken)) {
+    const broken: Partial<Record<CliName, string>> = {};
+    for (const name of CLI_NAMES) {
+      const said = v.broken[name];
+      if (!out[name] && isString(said)) broken[name] = said.replace(/\s+/g, " ").trim().slice(0, CLI_ERROR_MAX);
+    }
+    if (Object.keys(broken).length) out.broken = broken;
+  }
   return out;
 }
+
+/** The longest error line `executors.broken` keeps for a CLI. */
+export const CLI_ERROR_MAX = 300;
+/** `executors.broken.claude` on Windows when Git for Windows, which Claude Code needs there, isn't on the computer. */
+export const CLI_GIT_MISSING = "git_missing";
 
 /** `hello.accounts` (protocol 13): at most `MAX_MACHINE_ACCOUNTS`, ids and kinds checked, short words only. */
 export function parseAccounts(v: unknown[]): RunnerAccountInfo[] {
@@ -3290,11 +3661,13 @@ export function parsePlanUsage(v: unknown): PlanUsage | undefined {
           .slice(0, PLAN_USAGE_LIMITS.label)
       : "";
     const resetsAt = isoOf(w.resetsAt);
+    const read = isoOf(w.at);
     windows.push({
       kind,
       ...(label ? { label } : {}),
       usedPercent: Math.round(Math.min(100, Math.max(0, used))),
       ...(resetsAt ? { resetsAt } : {}),
+      ...(read && read < at ? { at: read } : {}),
     });
   }
   return {
@@ -3361,29 +3734,31 @@ export function parseBrainEvent(v: unknown): WireBrainEvent | null {
         ...(num(v.cacheWrite) > 0 ? { cacheWrite: num(v.cacheWrite) } : {}),
         ...(num(v.calls) > 0 ? { calls: num(v.calls) } : {}),
         ...(num(v.maxUncached) > 0 ? { maxUncached: num(v.maxUncached) } : {}),
+        ...(num(v.maxContext) > 0 ? { maxContext: num(v.maxContext) } : {}),
+        ...(num(v.lastContext) > 0 ? { lastContext: num(v.lastContext) } : {}),
       };
     case "limit":
       return { type: "limit", ...(isString(v.resetsAt) ? { resetsAt: v.resetsAt.slice(0, 40) } : {}) };
     case "done": {
       if (!isString(v.text)) return null;
       const session = isObject(v.session) && isString(v.session.id) ? { id: v.session.id.slice(0, 64) } : undefined;
-      const ms = (x: unknown) => (finite(x) !== undefined && (x as number) >= 0 ? Math.round(x as number) : undefined);
+      // A runner reports these itself: past a day it is a wrong clock, not a slow start, and would skew the percentiles
+      // (the counts share the bound, far above any real turn's).
+      const DAY_MS = 86_400_000;
+      const ms = (x: unknown) =>
+        finite(x) !== undefined && (x as number) >= 0 && (x as number) <= DAY_MS ? Math.round(x as number) : undefined;
       const t = isObject(v.timings) && typeof v.timings.warm === "boolean" ? v.timings : null;
-      const initMs = ms(t?.initMs);
-      const firstEventMs = ms(t?.firstEventMs);
+      const measures = t
+        ? BRAIN_TURN_MEASURES.flatMap((k) => {
+            const n = ms(t[k]);
+            return n === undefined ? [] : [[k, n] as const];
+          })
+        : [];
       return {
         type: "done",
         text: v.text.slice(0, BRAIN_LIMITS.doneText),
         ...(session ? { session } : {}),
-        ...(t
-          ? {
-              timings: {
-                warm: t.warm as boolean,
-                ...(initMs !== undefined ? { initMs } : {}),
-                ...(firstEventMs !== undefined ? { firstEventMs } : {}),
-              },
-            }
-          : {}),
+        ...(t ? { timings: { warm: t.warm as boolean, ...Object.fromEntries(measures) } } : {}),
       };
     }
     case "error":
@@ -3407,6 +3782,10 @@ export function parseBrainEvent(v: unknown): WireBrainEvent | null {
         .map((u) => u.slice(0, 64));
       return uuids.length ? { type: "steer_read", uuids } : null;
     }
+    case "answer":
+      return isString(v.text) && v.text.trim() !== ""
+        ? { type: "answer", text: v.text.slice(0, BRAIN_LIMITS.doneText) }
+        : null;
     case "speed_fallback":
       return { type: "speed_fallback", message: (isString(v.message) ? v.message : "").slice(0, BRAIN_LIMITS.message) };
     case "tool_started":
@@ -3415,6 +3794,18 @@ export function parseBrainEvent(v: unknown): WireBrainEvent | null {
         : null;
     case "file":
       return isString(v.path) && v.path.length > 0 && v.path.length <= 1024 ? { type: "file", path: v.path } : null;
+    case "stalled": {
+      const phase = BRAIN_STALL_PHASES.find((p) => p === v.phase);
+      if (!phase) return null;
+      return {
+        type: "stalled",
+        phase,
+        ...(isString(v.tool) && v.tool ? { tool: v.tool.slice(0, BRAIN_LIMITS.toolName) } : {}),
+        ...(isString(v.label) && v.label ? { label: v.label.slice(0, 200) } : {}),
+        silentMs: num(v.silentMs),
+        resumed: v.resumed === true,
+      };
+    }
     default:
       return null;
   }
@@ -3496,6 +3887,8 @@ export function parseRunnerFrame(raw: string): RunnerFrame | null {
         ...(isObject(f.holds) ? { holds: parseHolds(f.holds) } : {}),
       };
     }
+    case "room.freed":
+      return { type: "room.freed" };
     case "keep.ended": {
       const reason = HOLD_ENDS.find((r) => r === f.reason);
       return isUuid(f.holdId) && reason ? { type: "keep.ended", holdId: f.holdId, reason } : null;
@@ -3541,9 +3934,15 @@ export function parseRunnerFrame(raw: string): RunnerFrame | null {
         ...(message !== undefined ? { message } : {}),
       };
     }
+    case "browser.pointer":
+    case "desktop.pointer": {
+      const pointer = parseAgentPointer(f);
+      return isString(f.agentId) && pointer ? { type: f.type, agentId: f.agentId.slice(0, 64), ...pointer } : null;
+    }
     case "runner.state": {
       const paused = parsePause(f.paused);
-      return paused ? { type: "runner.state", paused } : null;
+      if (!paused) return null;
+      return { type: "runner.state", paused, ...(taskLimit(f.maxTasks) ? { maxTasks: f.maxTasks } : {}) };
     }
     case "access.changed": {
       const access = parseAccess(f.access);
@@ -3941,6 +4340,8 @@ export const MISSION_MCP_TOOLS: readonly MissionMcpTool[] = [
         request_id: { type: "string", maxLength: 64 },
         /** Added by the runner: where the task runs and its folders (the code-side rules check paths). */
         scope: { type: "object" },
+        /** Added by the runner: it refused this call by itself (`localVerdict`'s code and words), told for the run's steps. */
+        refused: { type: "object" },
       },
     },
   },
@@ -4208,8 +4609,16 @@ export function parseMachineSize(v: unknown): MachineSize | null {
     isObject(l) && inRange(l.cpus, [1, v.cpus]) && between(l.memoryGb, 0, v.memoryGb)
       ? { limit: { cpus: l.cpus, memoryGb: l.memoryGb } }
       : {};
-  return { cpus: v.cpus, memoryGb: v.memoryGb, diskGb: v.diskGb, ...limit };
+  return {
+    cpus: v.cpus,
+    memoryGb: v.memoryGb,
+    diskGb: v.diskGb,
+    ...limit,
+    ...(taskLimit(v.maxTasks) ? { maxTasks: v.maxTasks } : {}),
+  };
 }
+
+const taskLimit = (v: unknown): v is number => inRange(v, TASK_LIMIT_BOUNDS);
 
 /** `pong.load` (protocol 22): sane numbers, else none. */
 export function parseMachineLoad(v: unknown): MachineLoad | null {

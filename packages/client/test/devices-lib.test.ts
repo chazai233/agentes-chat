@@ -14,12 +14,20 @@ import {
   deviceRows,
   deviceWaitEventOf,
   deviceWaitOf,
+  failedOnLocalNetwork,
   fixText,
+  IPHONE_RESTART_MS,
+  type IphoneRestartMemo,
+  type IphoneSeen,
   iosOf,
   iphoneNoTeam,
+  iphoneRestartNext,
+  iphoneRestartOf,
   iphoneSteps,
   linkPhase,
+  mayChangeTasks,
   mayTakePhone,
+  NO_IPHONE_RESTART,
   narrowsAudience,
   newComputerOf,
   phoneCloseState,
@@ -29,6 +37,9 @@ import {
   screenGesture,
   statusDetail,
   statusPill,
+  statusSentence,
+  taskChoices,
+  taskLimitLine,
   waitEndedText,
   waitText,
   wifiHosts,
@@ -90,6 +101,24 @@ const computer = (c: Partial<ComputerDevice>): ComputerDevice => ({
   ...c,
 });
 
+describe("tasks at once", () => {
+  test("a busy computer says its limit and where it changes; its owner changes it, an admin only on nobody's", () => {
+    const busy = computer({ status: { kind: "busy", running: 5, max: 5 }, maxTasks: 5 });
+    expect(taskLimitLine(t, busy, true)).toBe("Tasks at once here: 5. Change it below.");
+    expect(taskLimitLine(t, busy, false)).toBe("Tasks at once here: 5. The person who connected it can change that.");
+    expect(taskLimitLine(t, { ...busy, maxTasks: null, status: { kind: "busy", running: 3, max: 3 } }, true)).toBe(
+      "Tasks at once here: 3. Update its app to change that from here.",
+    );
+    expect(taskLimitLine(t, computer({}), true)).toBeNull();
+    expect(mayChangeTasks(busy, "u-sam", false)).toBe(true);
+    expect(mayChangeTasks(busy, "u-ana", true)).toBe(false);
+    expect(mayChangeTasks({ ...busy, ownerUserId: null }, "u-ana", true)).toBe(true);
+    expect(mayChangeTasks({ ...busy, machineKind: "managed", ownerUserId: null }, "u-ana", true)).toBe(false);
+    expect(taskChoices(7)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 20]);
+    expect(taskChoices(4)).toHaveLength(11);
+  });
+});
+
 describe("status words", () => {
   test("the pill says the state, the detail the rest", () => {
     const inUse = {
@@ -114,6 +143,20 @@ describe("status words", () => {
       statusDetail(t, "en-US", { kind: "offline", lastSeenAt: null, withHost: true }, { host: "Ana's iMac" }),
     ).toBe("with Ana's iMac");
     expect(statusDetail(t, "en-US", { kind: "ready" })).toBeNull();
+  });
+
+  test("a computer offline for a known cause: the row says why, its page adds the one way out", () => {
+    const off = (cause: "unresponsive" | "stopped" | "dropped") =>
+      ({ kind: "offline", lastSeenAt: at(14, 2), cause }) as const;
+    expect(statusDetail(t, "en-US", off("unresponsive"), { now: NOW })).toBe("stopped answering at 2:02 PM");
+    expect(statusDetail(t, "en-US", off("stopped"), { now: NOW })).toBe("runner stopped at 2:02 PM");
+    expect(statusDetail(t, "en-US", off("dropped"), { now: NOW })).toBe("connection dropped at 2:02 PM");
+    expect(statusSentence(t, "en-US", off("stopped"), { now: NOW })).toBe(
+      "The runner stopped at 2:02 PM. Start it again, or run `agentes-runner doctor` on it to see why.",
+    );
+    expect(statusSentence(t, "en-US", off("unresponsive"), { now: NOW })).toContain(
+      "Run `agentes-runner doctor` on it.",
+    );
   });
 });
 
@@ -284,6 +327,51 @@ describe("connecting a phone", () => {
     });
   });
 
+  test("iPhone: restarting for Developer Mode stays on that step, then waits on the person once back", () => {
+    const mac = computer({ toolchains: { xcode: "27.0", appleTeam: "Sam Rivera (Personal Team)" } });
+    // Gone from the Mac while restarting: the step stays, under way, instead of asking for the cable.
+    expect(Object.values(iphoneSteps(mac, null, true))).toEqual([
+      "done",
+      "done",
+      "done",
+      "done",
+      "done",
+      "current",
+      "waiting",
+      "waiting",
+    ]);
+    let memo: IphoneRestartMemo = NO_IPHONE_RESTART;
+    let now = 0;
+    const see = (phone: IphoneSeen) => {
+      memo = iphoneRestartNext(memo, phone, now);
+      return iphoneRestartOf(memo, phone, now);
+    };
+    const off = { key: "p-1", reason: "developer_mode_off" };
+    expect(see(off)).toBeNull();
+    now = 1000;
+    expect(see(null)).toBe("restarting");
+    now += IPHONE_RESTART_MS - 2000;
+    expect(see(null)).toBe("restarting");
+    // Back, the mode still off: it waits on the person to unlock it and tap Turn On.
+    expect(see(off)).toBe("back");
+    expect(see(off)).toBe("back");
+    // On: done with it.
+    expect(see({ key: "p-1", reason: null })).toBeNull();
+    expect(see(null)).toBeNull();
+    // Gone too long: plugged out, not restarting.
+    expect(see(off)).toBeNull();
+    now += 10;
+    expect(see(null)).toBe("restarting");
+    now += IPHONE_RESTART_MS;
+    expect(see(null)).toBeNull();
+    // Another iPhone shows up instead: its own step, nothing remembered.
+    expect(see({ key: "p-2", reason: "developer_mode_off" })).toBeNull();
+    // A phone gone from any other step was unplugged.
+    memo = NO_IPHONE_RESTART;
+    see({ key: "p-1", reason: "untrusted" });
+    expect(see(null)).toBeNull();
+  });
+
   test("iPhone: a team found without its name, an account with no team, refused taps, an iOS too old", () => {
     // A runner that tells the account apart from its team: a team is enough, an account alone is the person's step.
     expect(iphoneSteps(computer({ toolchains: { xcode: "27.0", appleAccount: "team" } }), null).account).toBe("done");
@@ -421,6 +509,13 @@ describe("pairing over Wi-Fi", () => {
       "On that Mac, also turn on agentes.chat in System Settings › Privacy & Security › Local Network.",
     );
     expect(onMac("refused")).toBe("The phone didn't take that code. Check the code and the address, then pair again.");
+    // Those same causes, and only they, get the button to that setting in the app on that Mac.
+    expect(
+      (["same_wifi", "mdns_off", "timed_out", "refused", "outdated"] as const).map((reason) =>
+        failedOnLocalNetwork({ state: "failed", reason }),
+      ),
+    ).toEqual([true, true, true, false, false]);
+    expect(failedOnLocalNetwork({ state: "pairing" })).toBe(false);
     expect([
       wifiPairLive({ state: "connecting" }),
       wifiPairLive({ state: "connected" }),
@@ -510,6 +605,24 @@ describe("in the chat and the inbox", () => {
       tool: "browser",
       askerId: "u-caio",
       agentId: null,
+    });
+    // An agent waits for a folder: the folder in `latest.title` (never read as a person's name), the computer and the
+    // agent in it.
+    const folder = {
+      kind: "device.folder_request",
+      actors: [{ type: "agent", id: "a-lia" }],
+      source: { machineId: "m1", label: "Bia's Mac", agentId: "a-lia", requestId: "fr1", userId: "u-rui" },
+      latest: { title: "/Users/bia/Music", text: "the playlist" },
+    } as never;
+    expect(deviceNoticeOf(folder)).toMatchObject({
+      kind: "device.folder_request",
+      machineId: "m1",
+      device: "Bia's Mac",
+      path: "/Users/bia/Music",
+      forName: null,
+      agentId: "a-lia",
+      userId: "u-rui",
+      text: "the playlist",
     });
   });
 });

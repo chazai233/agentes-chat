@@ -5,6 +5,7 @@ import { formatBytes } from "./format";
 import type { Judge } from "./judge";
 import { recordOperatorEvent } from "./operator-events";
 import { can, requirePermission } from "./organizations";
+import { RouterSkip, type RouterStrategy } from "./router";
 import { storedBytes, usesOwnBucket } from "./storage";
 import { monthStartUtc } from "./usage";
 
@@ -12,7 +13,8 @@ import { monthStartUtc } from "./usage";
  * A workspace's limits (ADR 0079): plain numbers a billing service sets through the operator API, enforced here
  * without knowing any plan. Null is no limit, all a self-hosted server ever has.
  *
- * - `members`: membership rows, blocked accounts included; agents, invitations and requests to join never count.
+ * - `members`: membership rows, blocked accounts included; agents, invitations, requests to join and outside
+ *   collaborators (rows with `outside_of`, ADR 0191) never count.
  * - `membersMax`: the most people the plan takes with seats added (`members` up to it); null: the service sets none.
  * - `payerUserId`: not a limit, the person who pays for the plan, the only one the billing service lets add seats or
  *   change plans; null: not said.
@@ -29,7 +31,7 @@ export interface OrgLimits {
   platformUsdPerMonth: number | null;
 }
 
-const { organizations, organizationMembers, artifactVersions, skillFiles, usageRecords } = schema;
+const { organizations, organizationMembers, artifactVersions, skillFiles, usageRecords, liveAssets } = schema;
 
 /** `usage_records.cost_nano_usd`'s unit, in which the platform cap is kept. */
 const NANO_PER_USD = 1e9;
@@ -113,7 +115,12 @@ export async function setOrgLimits(
 }
 
 const memberCount = async (db: Executor, orgId: string) =>
-  (await db.select({ n: count() }).from(organizationMembers).where(eq(organizationMembers.orgId, orgId)))[0]?.n ?? 0;
+  (
+    await db
+      .select({ n: count() })
+      .from(organizationMembers)
+      .where(and(eq(organizationMembers.orgId, orgId), isNull(organizationMembers.outsideOf)))
+  )[0]?.n ?? 0;
 
 /**
  * Refuses one more person in a full workspace (`org.members_full`, 409). Exact only under the workspace's
@@ -143,7 +150,7 @@ export async function storageUsage(
   db: Executor,
   orgId: string,
 ): Promise<{ usedBytes: number; uploadBytes24h: number }> {
-  const [stored, [files], [skills]] = await Promise.all([
+  const [stored, [files], [skills], [pictures]] = await Promise.all([
     storedBytes(db, orgId),
     db
       .select({ day: sql<string>`coalesce(sum(${artifactVersions.size}), 0)` })
@@ -166,8 +173,14 @@ export async function storageUsage(
           gt(skillFiles.createdAt, LAST_DAY),
         ),
       ),
+    // Pictures added to live files (ADR 0196 §8): uploads like any other.
+    db
+      .select({ day: sql<string>`coalesce(sum(${liveAssets.size}), 0)` })
+      .from(liveAssets)
+      .where(and(eq(liveAssets.orgId, orgId), isNull(liveAssets.storageConfigId), gt(liveAssets.createdAt, LAST_DAY))),
   ]);
-  return { usedBytes: stored.platformBytes, uploadBytes24h: Number(files?.day ?? 0) + Number(skills?.day ?? 0) };
+  const day = Number(files?.day ?? 0) + Number(skills?.day ?? 0) + Number(pictures?.day ?? 0);
+  return { usedBytes: stored.platformBytes, uploadBytes24h: day };
 }
 
 /**
@@ -274,8 +287,25 @@ export function platformCapJudge(db: Database, jev: Judge): Judge {
   return {
     name: jev.name,
     async ask(request) {
-      if (await platformCapReached(db, request.orgId)) throw new Error("platform_cap");
+      if (await platformCapReached(db, request.orgId)) throw new Error(PLATFORM_CAP);
       return jev.ask(request);
+    },
+  };
+}
+
+/**
+ * The router's Jev step, skipped for a workspace past its platform AI for the month: the chain's next step (the
+ * workspace's own small model) picks in its place. With none, `routeMessage` says so (`platform_cap`).
+ */
+export function platformCapRouter(db: Database, jev: RouterStrategy): RouterStrategy {
+  return {
+    get name() {
+      return jev.name;
+    },
+    ...(jev.on ? { on: () => jev.on?.() ?? true } : {}),
+    async decide(input) {
+      if (await platformCapReached(db, input.orgId)) throw new RouterSkip(PLATFORM_CAP);
+      return jev.decide(input);
     },
   };
 }

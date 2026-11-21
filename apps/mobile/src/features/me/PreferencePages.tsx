@@ -10,35 +10,26 @@ import {
   useSetShowActivity,
   useSetStart,
 } from "@agenteschat/client";
-import { APP_ICONS, type AppIconId, appIconNameKey } from "@agenteschat/client/lib/app-icons";
 import { type AppLocale, readyLocales } from "@agenteschat/i18n/locale";
-import { SOUND_STYLES, type SoundStyle } from "@agenteschat/ui/sfx";
+import type { SoundStyle } from "@agenteschat/ui/sfx";
 import { useFocusEffect } from "expo-router";
 import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Image, Linking, Platform, StyleSheet, View } from "react-native";
+import { Linking, Platform, StyleSheet, View } from "react-native";
+import { setLiveActivityOn, useLiveActivityOn } from "@/features/live-activity/switch";
 import { pushPermission, unregisterPush } from "@/lib/push";
-import { setSoundChoice, useSoundChoice } from "@/lib/sounds";
 import { readValue, STORED } from "@/lib/storage";
 import { deviceLocale, readLocaleState, rememberLocale, setLocale } from "@/providers/i18n";
 import { useOrg } from "@/providers/org";
 import { usePush } from "@/providers/push";
-import {
-  GroupedFooter,
-  GroupedHeader,
-  GroupedList,
-  GroupedRow,
-  type IconName,
-  type ThemePreference,
-  useTheme,
-  useToast,
-} from "@/ui";
-import { APP_ICON_PICTURES, useAppIcon } from "./app-icon";
+import { GroupedFooter, GroupedHeader, GroupedList, GroupedRow, type IconName, SkeletonList, useToast } from "@/ui";
+import { LoadFailed } from "../shared/FirstUse";
 import { Page } from "./parts";
+import { SurfaceLinkRow } from "./SurfaceLink";
 
 /**
- * Você's smaller screens, each pushed from its row: Workspaces, Notificações, Ao abrir o app, Respostas dos agentes,
- * Sons, Aparência, Ícone do app and Idioma.
+ * Você's smaller screens, each pushed from its row: Notificações, Ao abrir o app, Respostas dos agentes, Como os
+ * agentes falam com você and Idioma (Sons and Aparência change in their row; Ícone do app is AppIconPage.tsx).
  */
 
 const SOUND_LABELS: Record<SoundStyle, string> = {
@@ -112,6 +103,8 @@ export function NotificationsPage() {
   const toast = useToast();
   const { orgId } = useOrg();
   const push = usePushSwitch();
+  // The agents at work in the Dynamic Island (ADR 0210): this phone's own switch.
+  const liveActivityOn = useLiveActivityOn();
   const prefs = useNoticePrefs(orgId);
   const set = useSetNoticePref(orgId);
   const on = push.on ?? false;
@@ -128,7 +121,27 @@ export function NotificationsPage() {
           toggle={on}
           onPress={() => void push.set(!on)}
         />
+        {Platform.OS === "ios" ? (
+          <GroupedRow
+            label={t("mobile.me.liveActivity")}
+            hint={{
+              name: t("common.about", { label: t("mobile.me.liveActivity") }),
+              text: t("mobile.me.liveActivityHint"),
+            }}
+            toggle={liveActivityOn}
+            onPress={() => setLiveActivityOn(!liveActivityOn)}
+          />
+        ) : null}
       </GroupedList>
+      <SurfaceLinkRow />
+      {prefs.isLoading ? (
+        <>
+          <View style={styles.gap} />
+          <SkeletonList rows={4} />
+        </>
+      ) : prefs.isError && !prefs.data ? (
+        <LoadFailed onRetry={() => void prefs.refetch()} />
+      ) : null}
       {prefs.data ? (
         <>
           <GroupedHeader
@@ -274,104 +287,6 @@ export function AgentStylePage() {
         />
       </GroupedList>
       <GroupedFooter>{t("settings.account.agentStyleHelp")}</GroupedFooter>
-    </Page>
-  );
-}
-
-/** Sons: on or off, then the style. */
-export function SoundsPage() {
-  const { t } = useTranslation();
-  const sounds = useSoundChoice();
-  const label = useSoundLabel();
-  return (
-    <Page title={t("mobile.me.sounds")}>
-      <View style={styles.gap} />
-      <GroupedList>
-        <GroupedRow
-          label={t("mobile.me.soundsOn")}
-          hint={{ name: t("common.about", { label: t("mobile.me.soundsOn") }), text: t("mobile.me.soundsHint") }}
-          toggle={sounds !== "off"}
-          onPress={() => setSoundChoice(sounds === "off" ? "tactile" : "off")}
-        />
-      </GroupedList>
-      {sounds !== "off" && (
-        <>
-          <GroupedHeader>{t("mobile.me.soundStyle")}</GroupedHeader>
-          <GroupedList>
-            {SOUND_STYLES.map((style) => (
-              <GroupedRow
-                key={style}
-                label={label(style)}
-                checked={sounds === style}
-                onPress={() => setSoundChoice(style)}
-              />
-            ))}
-          </GroupedList>
-        </>
-      )}
-    </Page>
-  );
-}
-
-/** Aparência: the system's, light or dark. */
-export function AppearancePage() {
-  const { t } = useTranslation();
-  const theme = useTheme();
-  return (
-    <Page title={t("mobile.me.appearance")}>
-      <View style={styles.gap} />
-      <GroupedList>
-        {(["system", "light", "dark"] as const).map((key) => (
-          <GroupedRow
-            key={key}
-            label={t(`mobile.theme.${key}`)}
-            checked={theme.preference === key}
-            onPress={() => theme.setPreference(key as ThemePreference)}
-          />
-        ))}
-      </GroupedList>
-    </Page>
-  );
-}
-
-/** An icon's picture as the home screen shows it (in this appearance), rounded like one. */
-export function AppIconPicture({ id, size = 32 }: { id: AppIconId; size?: number }) {
-  const theme = useTheme();
-  const picture = APP_ICON_PICTURES[id][theme.scheme === "dark" ? "dark" : "light"];
-  return (
-    <Image
-      source={picture}
-      style={{ width: size, height: size, borderRadius: Math.round(size * 0.225) }}
-      accessibilityIgnoresInvertColors
-    />
-  );
-}
-
-/** Ícone do app (ADR 0179): the icons with their pictures; a tap changes the home screen's at once. */
-export function AppIconPage() {
-  const { t } = useTranslation();
-  const toast = useToast();
-  const appIcon = useAppIcon();
-  const pick = (id: AppIconId) => {
-    if (id === appIcon.icon) return;
-    appIcon.set(id).catch(() => toast({ title: t("appIcon.failed"), icon: "x" }));
-  };
-  return (
-    <Page title={t("appIcon.title")}>
-      <View style={styles.gap} />
-      <GroupedList>
-        {APP_ICONS.map((id) => (
-          <GroupedRow
-            key={id}
-            leading={<AppIconPicture id={id} />}
-            label={t(appIconNameKey(id))}
-            checked={appIcon.icon === id}
-            onPress={() => pick(id)}
-          />
-        ))}
-      </GroupedList>
-      {/* iOS confirms with an alert of its own; Android's home screens take their time. */}
-      {Platform.OS === "android" ? <GroupedFooter>{t("appIcon.hintAndroid")}</GroupedFooter> : null}
     </Page>
   );
 }

@@ -44,22 +44,26 @@ import {
   useMachines,
   wheelEvent,
 } from "@agenteschat/client";
+import { browserCardLine, hostAndPath, titleKind } from "@agenteschat/client/lib/browser-card";
 import { formatTime, lowerFirst } from "@agenteschat/client/lib/format";
 import { agentGrammar } from "@agenteschat/client/lib/grammar";
-import { browserOffMessage, profileRefusalLine } from "@agenteschat/client/lib/machines";
+import { browserNoAnswerMessage, browserOffMessage, profileRefusalLine } from "@agenteschat/client/lib/machines";
+import { MAX_MESSAGE_LENGTH } from "@agenteschat/client/lib/message-length";
 import { can as canDo } from "@agenteschat/client/lib/permissions";
 import { useSeat } from "@agenteschat/client/lib/seat-context";
-import { isBlankPage } from "@agenteschat/client/lib/sites";
+import { isBlankPage, siteName } from "@agenteschat/client/lib/sites";
 import {
   agentGradient,
   Button,
   Chip,
   FilterToggle,
+  focusIdle,
   Icon,
   type IconName,
   isApple,
   Locked,
   onScreenNow,
+  overLimit,
   PixelSpinner,
   SkyStrip,
   shortcut,
@@ -82,6 +86,7 @@ import { Trans, useTranslation } from "react-i18next";
 import { withAgentFace } from "@/components/AgentAvatar";
 import { useDirectory } from "@/hooks/useDirectory";
 import { TOUCH, useMatchMedia } from "@/hooks/useMatchMedia";
+import { useTextLimit } from "@/hooks/useTextLimit";
 import { usePageVisible } from "@/hooks/useWindowActive";
 import { pastes } from "@/lib/keys";
 import { useToast } from "@/lib/toast";
@@ -94,21 +99,25 @@ import { DesktopView } from "../desktop/DesktopView";
 import { PASTE_MAX_BYTES, pasteBytes } from "../desktop/paste";
 import { MachineToolButton } from "../devices/ToolOneClick";
 import { useOrg } from "../org-context";
+import { ReportProblem } from "../ReportProblem";
 import { colorOf } from "../Sky";
 import { useComputerEdition } from "../WorkspaceComputer";
 import { AddressBar } from "./AddressBar";
+import { AgentCursor } from "./AgentCursor";
 import { Cover } from "./Cover";
 import { LivePicture } from "./LivePicture";
 import { requestBrowserCard, useBrowserCardRequest } from "./open";
-import { SiteIcon, siteName } from "./SiteIcon";
+import { SiteIcon } from "./SiteIcon";
 import "./browser.css";
 
+// The card's title, shared with the phone.
+export { titleKind } from "@agenteschat/client/lib/browser-card";
 // The computer dialog takes it from here too.
 export { Cover } from "./Cover";
 
 const FAIL_REASONS = ["code", "password", "blocked"] as const;
-/** The reason goes before it, in the 1000 the server takes. */
-const FAIL_NOTE_MAX = 900;
+/** The reason goes before it, in what the server takes: a message's length. */
+const FAIL_NOTE_MAX = MAX_MESSAGE_LENGTH - 100;
 /** The scroll hint goes this long after the wheel's last tick. */
 const SCROLL_HINT_IDLE_MS = 1200;
 const KEYS = ["Tab", "Enter", "Backspace", "Escape"] as const;
@@ -193,28 +202,6 @@ function newest(a: BrowserHandoff | null, b: BrowserHandoff | null): BrowserHand
   if (!a || !b) return a ?? b;
   if (a.id !== b.id) return a;
   return RANK[b.status] > RANK[a.status] ? b : a;
-}
-
-/** "https://dashboard.stripe.com/login?x=1" → ["dashboard.stripe.com", "/login"]. */
-export function hostAndPath(url: string | null | undefined): [string, string] {
-  if (!url) return ["", ""];
-  const m = /^[a-z]+:\/\/([^/?#]+)([^?#]*)/i.exec(url);
-  return m ? [m[1] ?? "", (m[2] ?? "").replace(/\/$/, "")] : [url, ""];
-}
-
-/**
- * What the card's title shows: the request while the person is in control of it, else the
- * site, "opening" only until the first frame, and the agent's browser when no site is known.
- */
-export function titleKind(v: {
-  inControl: boolean;
-  ask: string | null;
-  host: string;
-  opening: boolean;
-}): "ask" | "host" | "opening" | "agent" {
-  if (v.inControl && v.ask) return "ask";
-  if (v.host) return "host";
-  return v.opening ? "opening" : "agent";
 }
 
 /**
@@ -459,6 +446,7 @@ export function BrowserCard({
   const [failing, setFailing] = useState(false);
   const [reason, setReason] = useState<(typeof FAIL_REASONS)[number] | null>(null);
   const [note, setNote] = useState("");
+  const failLimit = useTextLimit(FAIL_NOTE_MAX);
   const [backNote, setBackNote] = useState("");
   const [confirmStop, setConfirmStop] = useState(false);
   const [keysOpen, setKeysOpen] = useState(false);
@@ -703,7 +691,7 @@ export function BrowserCard({
   }, [pointing, fingers]);
   // The button that opened the page leaves with the focus: keys typed at once, at a field the page shows, go there.
   useEffect(() => {
-    if (pointing && document.activeElement === document.body) pageRef.current?.focus({ preventScroll: true });
+    if (pointing && focusIdle()) pageRef.current?.focus({ preventScroll: true });
   }, [pointing]);
   // The screen's last picture, when the dialog switches from it to this page (or back), shows dimmed until the page's
   // first frame: the layout effects of the view going and of the one coming run before anything paints
@@ -789,7 +777,7 @@ export function BrowserCard({
   };
 
   const fail = () => {
-    if (!handoff) return;
+    if (!handoff || overLimit(note, failLimit)) return;
     const words = [reason ? t(`browser.live.failReasons.${reason}`) : "", note.trim()].filter(Boolean).join(". ");
     actions.failed.mutate(
       { handoffId: handoff.id, ...(words ? { note: words } : {}) },
@@ -859,6 +847,7 @@ export function BrowserCard({
   // (the switch when the browser is off there). An agent's own browser retries by itself, as before.
   const refusedHere = unavailable?.reason === "unavailable" && Boolean(profile);
   const offHere = refusedHere && browserOffMessage(unavailable?.message);
+  const noAnswer = refusedHere && browserNoAnswerMessage(unavailable?.message);
   // What can't change by waiting is said plainly; everything else is "opening" while it retries.
   const blocker = shows
     ? null
@@ -871,7 +860,11 @@ export function BrowserCard({
           : live.error === "too_many_browsers"
             ? t("browser.inCard.tooMany")
             : refusedHere
-              ? t(offHere ? "browser.profiles.toolOff" : "browser.live.unavailable")
+              ? offHere
+                ? t("browser.profiles.toolOff")
+                : noAnswer
+                  ? t("browser.inCard.noAnswer", g)
+                  : t("browser.live.unavailable")
               : null;
   const starting = !shows && !frame && !blocker && !reconnecting && !closed && !opening && !hidden;
   // Opening or reconnecting for too long says so, with Try again: who may drive it restarts the browser, the
@@ -880,6 +873,13 @@ export function BrowserCard({
   const [attempt, setAttempt] = useState(0);
   // Never on the screen: the card watches no frames there (`watching`).
   const stuck = useBrowserStuck(watching && online && !hidden && (starting || reconnecting || opening), attempt);
+  const reportOf = (code: string) => ({
+    place: "browser" as const,
+    code,
+    step: opening ? "open" : reconnecting ? "reconnect" : "start",
+    context: { agentId, ...(machine ? { machineId: machine.id } : {}) },
+    timings: { attempts: attempt + 1 },
+  });
   const retry = () => {
     setAttempt((n) => n + 1);
     // Watching again after the restart too: this view's own watch may be what the server refused.
@@ -1005,31 +1005,21 @@ export function BrowserCard({
           ? t("browser.inCard.opening")
           : t("browser.inCard.group", g);
   // On the screen (ADR 0058 §7) no frame says the page: what the agent does now, or watching.
-  const sub = inControl
-    ? profile
-      ? profile.machine
-        ? t("browser.profiles.controlSubOn", { machine: profile.machine.name })
-        : t("browser.profiles.controlSub")
-      : ask
-        ? host
-          ? t("browser.inCard.subControl", { site: host, ...g })
-          : t("browser.inCard.subControlAsked", g)
-        : t("browser.inCard.subTakeover", g)
-    : otherInControl
-      ? hidden
-        ? t("browser.inCard.subHidden", { person: controllerName })
-        : t("browser.inCard.subOther", { person: controllerName })
-      : closed
-        ? t("browser.inCard.subClosed")
-        : stuck
-          ? t("browser.inCard.subStuck")
-          : reconnecting
-            ? t("browser.inCard.subReconnect", g)
-            : starting || (!lastStep && !pic && !shows)
-              ? t("browser.inCard.subStarting", g)
-              : lastStep
-                ? t("browser.inCard.subWorking", { name, now: lowerFirst(stepText(t, lastStep), i18n.language) })
-                : t("browser.live.watchOnly");
+  const sub = browserCardLine(t, {
+    grammar: g,
+    inControl,
+    otherInControl,
+    controllerName,
+    hidden,
+    closed,
+    stuck,
+    reconnecting,
+    starting: starting || (!lastStep && !pic && !shows),
+    ask,
+    host,
+    profile: profile ? { machineName: profile.machine?.name ?? null } : null,
+    now: lastStep ? lowerFirst(stepText(t, lastStep), i18n.language) : null,
+  });
   const live_ = working && !blocker && !closed && !stuck;
   const spinning = live_ || (reconnecting && !stuck);
   // The dialog's sub-line: the same, but live and watching is what the dialog knows (a request, a hold). Over a cover
@@ -1160,18 +1150,22 @@ export function BrowserCard({
         color={color}
         icon="alert"
         text={blocker}
+        help={noAnswer && mayDrive ? t("browser.inCard.stuckHelp") : undefined}
         action={
           profile?.machine && offHere ? (
             <MachineToolButton machine={profile.machine} tool="browser" onAllowed={retry} />
           ) : (
-            <Button
-              size="sm"
-              icon="refresh"
-              loading={actions.restart.isPending || profileActions.takeover.isPending}
-              onClick={retry}
-            >
-              {t("common.retry")}
-            </Button>
+            <span className="ac-acts">
+              <Button
+                size="sm"
+                icon="refresh"
+                loading={actions.restart.isPending || profileActions.takeover.isPending}
+                onClick={retry}
+              >
+                {t("common.retry")}
+              </Button>
+              {noAnswer && <ReportProblem {...reportOf("browser.no_answer")} />}
+            </span>
           )
         }
       />
@@ -1195,9 +1189,12 @@ export function BrowserCard({
         text={t("browser.inCard.stuck", g)}
         help={mayDrive ? t("browser.inCard.stuckHelp") : undefined}
         action={
-          <Button size="sm" icon="refresh" loading={actions.restart.isPending} onClick={retry}>
-            {t("common.retry")}
-          </Button>
+          <span className="ac-acts">
+            <Button size="sm" icon="refresh" loading={actions.restart.isPending} onClick={retry}>
+              {t("common.retry")}
+            </Button>
+            <ReportProblem {...reportOf("browser.stuck")} />
+          </span>
         }
       />
     ) : opening ? (
@@ -1231,6 +1228,7 @@ export function BrowserCard({
       style={framed ? frameStyle : undefined}
       role="group"
       data-esc-layer={full ? "" : undefined}
+      data-control={inControl || undefined}
       aria-label={t("browser.inCard.group", g)}
     >
       {!surface && !framed && <SkyStrip color={color} muted={inControl} moving={live_} />}
@@ -1395,6 +1393,8 @@ export function BrowserCard({
             >
               {inControl && <textarea ref={pasteRef} className="brw-paste" tabIndex={-1} aria-hidden="true" />}
               <LivePicture frame={frame} alt={t("browser.live.page", g)} imgRef={imgRef} />
+              {/* Nobody in control: the agent works, and its cursor shows where (ADR 0040 §7.2). */}
+              {!controller && <AgentCursor agentId={agentId} name={name} color={color} pointer={live.pointer} />}
               {mark && <span key={mark.key} className="brw-mark" style={{ left: mark.x, top: mark.y }} />}
               {(sliding || scrolling) && (
                 <span className="brw-ac__capture" role="status" data-esc-layer="">
@@ -1480,14 +1480,20 @@ export function BrowserCard({
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
                 placeholder={t("browser.live.failPlaceholder")}
-                maxLength={FAIL_NOTE_MAX}
+                limit={failLimit}
               />
               <div className="brw-ac__row">
                 <span className="brw-grow" />
                 <Button size="sm" variant="ghost" onClick={() => setFailing(false)}>
                   {t("browser.live.back")}
                 </Button>
-                <Button size="sm" variant="primary" loading={actions.failed.isPending} onClick={fail}>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={overLimit(note, failLimit)}
+                  loading={actions.failed.isPending}
+                  onClick={fail}
+                >
                   {t("browser.live.failSend", g)}
                 </Button>
               </div>
@@ -1596,7 +1602,7 @@ export function BrowserCard({
                 variant="ghost"
                 disabled={actions.done.isPending}
                 onClick={() => {
-                  setNote((words) => words || backNote.slice(0, FAIL_NOTE_MAX));
+                  setNote((words) => words || backNote);
                   setFailing(true);
                 }}
               >

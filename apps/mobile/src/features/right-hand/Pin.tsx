@@ -6,6 +6,7 @@ import type { AgentMode } from "@/agent/poses";
 import { Text } from "@/ui";
 import { router } from "@/ui/navigation";
 import type { ConversationRow } from "../chats/logic";
+import { useChatOpener } from "../chats/split";
 import { chatHref } from "../links/logic";
 import { AgentFace } from "../shared/Face";
 import { useSurface } from "../shared/parts";
@@ -15,7 +16,7 @@ import { useSurface } from "../shared/parts";
  * conversation's composer ("Mensagem para Atlas", its face before it), the app's card with its cut corner. It opens
  * its DM (starting one when there is none yet). It never carries a count or a dot: when the right hand answered and
  * you haven't read it, its last line takes the invitation's place, in the text's own color ("Atlas: deixei o
- * resumo na sua conversa"). It is not one of Agentes' rows.
+ * resumo na sua conversa"). It is never a row of Recentes nor a face on the pinned strip.
  */
 export function RightHandAsk({
   row,
@@ -32,6 +33,8 @@ export function RightHandAsk({
 }) {
   const { t } = useTranslation();
   const surface = useSurface();
+  // Beside the list (ADR 0212) its conversation opens in the split's pane.
+  const opener = useChatOpener();
   if (row.kind !== "dm") return null;
   const invite = t("mobile.chat.messageTo", { name: row.with.name });
   // Its own last words, unread: shown in place of the invitation (a reply from you keeps the invitation).
@@ -42,6 +45,7 @@ export function RightHandAsk({
   const words = theirs ? `${row.with.name}: ${theirs}` : invite;
   const open = () => {
     if (!row.channelId) onStart(row.with.id);
+    else if (opener) opener.open({ channelId: row.channelId, threadId: null });
     else router.push(chatHref(row.channelId));
   };
   return (

@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createFrameClock } from "../src/agent/clock";
 
 function fakeTimers() {
@@ -59,4 +61,28 @@ test("one timer for many listeners", () => {
   expect(f.count).toBe(1);
   b();
   expect(f.count).toBe(0);
+});
+
+test("a hold stops the clock until every hold is released (a list scrolling, a screen sliding in)", () => {
+  const f = fakeTimers();
+  const clock = createFrameClock(25, f.timers);
+  clock.subscribe(() => {});
+  const scrolling = clock.hold();
+  const sliding = clock.hold();
+  expect(f.count).toBe(0);
+  scrolling();
+  // Released twice counts once: the slide still holds it.
+  scrolling();
+  expect(f.count).toBe(0);
+  sliding();
+  expect(f.count).toBe(1);
+  // The app's own pause still wins over no holds.
+  clock.setPaused(true);
+  expect(f.count).toBe(0);
+});
+
+test("this fork's faces are pictures: decoded at the size shown on Android, and the engine's frame kept for the Live Activity", () => {
+  const src = readFileSync(join(import.meta.dir, "../src/agent/AgentAvatar.tsx"), "utf8");
+  expect(src).toContain('const DECODE = Platform.OS === "android" ? ({ resizeMethod: "resize" } as const) : {};');
+  expect(src).toContain('export { agentFrame } from "./frame";');
 });

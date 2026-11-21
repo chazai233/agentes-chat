@@ -2,10 +2,12 @@ import type { PubSub } from "@agenteschat/adapters";
 import { and, type Database, eq, inArray, isNull, schema, sql } from "@agenteschat/db";
 import { type AgentWork, agentWorkFor, bareWork } from "./agent-work";
 import { publishOrgEvent } from "./events";
+import { type PendingReturn, pendingReturns } from "./follow-through";
 import { cutText } from "./format";
-import type { Judge } from "./judge";
+import type { Judge, JudgeGroup } from "./judge";
+import { queueLiveActivityRun } from "./live-activity-queue";
 import { requirePermission } from "./organizations";
-import { type OutOfOffice, type OutOfOfficeOptions, outOfOffice } from "./out-of-office";
+import { type OutOfOffice, outOfOffice } from "./out-of-office";
 import { rightHandId } from "./right-hand";
 import { routineSeer } from "./routines";
 import { outageParkedSql } from "./runs";
@@ -126,22 +128,51 @@ export async function agentStatuses(
   actorId: string,
   orgId: string,
   now = new Date(),
-  options: Pick<OutOfOfficeOptions, "hasModel"> = {},
 ): Promise<(AgentStatusView & { work: AgentWork | null })[]> {
   await requirePermission(db, actorId, orgId, "read");
-  const [list, sees, work, rightHand] = await Promise.all([
-    loadAgentStatuses(db, orgId, now, undefined, options),
+  const [list, sees, work, rightHand, returns] = await Promise.all([
+    loadAgentStatuses(db, orgId, now),
     routineSeer(db, orgId, actorId),
     agentWorkFor(db, actorId, orgId, new Date(now.getTime() - AGENT_HEARTBEAT_FRESH_MS)),
     rightHandId(db, orgId),
+    pendingReturns(db, actorId, orgId),
   ]);
+  const later = laterWork(returns);
   return list.map((s) => {
-    const w = work.get(s.agentId) ?? null;
+    const w = work.get(s.agentId) ?? later.get(s.agentId) ?? null;
     const seen = s.agentId === rightHand ? rightHandFor(s, w) : s;
     return sees({ agentId: s.agentId, createdByUserId: null })
       ? { ...seen, work: w }
       : { ...seen, status: null, work: w && bareWork(w) };
   });
+}
+
+/**
+ * An agent with nothing on and a return still ahead where the viewer reads (`pendingReturns`, soonest first): its work
+ * is `later`, the lists' "retorno às 00:32". A held one (past its time, waiting on an answer) says nothing there: the
+ * conversation's bar says it.
+ */
+function laterWork(returns: PendingReturn[]): Map<string, AgentWork> {
+  const out = new Map<string, AgentWork>();
+  for (const r of returns) {
+    if (r.held || out.has(r.agentId)) continue;
+    out.set(r.agentId, {
+      state: "later",
+      ask: null,
+      since: r.at,
+      runId: r.runId,
+      channelId: r.channelId,
+      channelKind: r.channelKind,
+      channelName: r.channelName,
+      threadId: r.threadId,
+      messageId: r.replyMessageId,
+      forAgentId: null,
+      routine: false,
+      count: 0,
+      at: r.at,
+    });
+  }
+  return out;
 }
 
 /**
@@ -159,14 +190,13 @@ const rightHandFor = (s: AgentStatusView, w: AgentWork | null): AgentStatusView 
 
 /**
  * Every agent's presence and line in an organization, at `now` (no permission check), or only `ids`'. Checked on
- * read, no job. `hasModel` (the gateway's key check) tells whether a plan at its limit still falls back to a model.
+ * read, no job.
  */
 export async function loadAgentStatuses(
   db: Database,
   orgId: string,
   now = new Date(),
   ids?: string[],
-  options: Pick<OutOfOfficeOptions, "hasModel"> = {},
 ): Promise<AgentStatusView[]> {
   if (ids?.length === 0) return [];
   const ofAgents = ids ? [inArray(agents.id, ids)] : [];
@@ -179,8 +209,9 @@ export async function loadAgentStatuses(
         model: agents.model,
         credentialId: agents.credentialId,
         brain: agents.brain,
-        brainFallback: agents.brainFallback,
         brainAccountId: agents.brainAccountId,
+        brainAccountPinned: agents.brainAccountPinned,
+        ownerUserId: agents.ownerUserId,
         machineId: agents.machineId,
         monthlyBudgetNanoUsd: agents.monthlyBudgetNanoUsd,
         heldAt: agents.operatorHoldAt,
@@ -231,10 +262,7 @@ export async function loadAgentStatuses(
       .from(agentRuns)
       .where(and(eq(agentRuns.orgId, orgId), inArray(agentRuns.status, [...ACTIVE, ...WAITING]), ...ofRuns)),
   ]);
-  const [works, outs] = await Promise.all([
-    liveWorksByAgent(db, orgId, ids),
-    outOfOffice(db, orgId, list, { now, ...options }),
-  ]);
+  const [works, outs] = await Promise.all([liveWorksByAgent(db, orgId, ids), outOfOffice(db, orgId, list, { now })]);
   const publicIds = await publicChannelIds(
     db,
     orgId,
@@ -493,10 +521,14 @@ export interface StatusCandidate {
   text: string;
 }
 
-/** What it is doing, by the group of the tool it uses; null = nothing worth a line (chat, memory, skills). */
+/**
+ * What it is doing, by the group of the tool it uses; null = nothing worth a line (chat, memory, skills). A person's
+ * own connection's tool says nothing: everyone who may talk to the agent reads the line.
+ */
 export function activityOf(
-  tool: Pick<ToolDefinition, "name" | "scope" | "connectionId" | "connectorLabel">,
+  tool: Pick<ToolDefinition, "name" | "scope" | "connectionId" | "connectorLabel" | "ownerUserId">,
 ): Omit<StatusCandidate, "key"> | null {
+  if (tool.ownerUserId) return null;
   const group = toolGroupKey(tool);
   const label = tool.connectorLabel?.trim();
   if (group === "browser") return { kind: "browsing", subject: null, text: "Browsing the web" };
@@ -661,9 +693,11 @@ export async function startRunStatus(
       : undefined
     : candidates.find((c) => STICKY.has(c.kind));
   const busy = (pick?.heavy ?? 0) >= AGENT_HEAVY_PROBABILITY;
-  await writeAutoLine(deps, run, chosen ?? null, { busy, now, keepOwn: true });
+  const wrote = await writeAutoLine(deps, run, chosen ?? null, { busy, now, keepOwn: true });
   // Its run started: the presence moved even when the line stays (the agent's own words, another run's).
   await announceAgentStatus(deps.pubsub, run.orgId, run.agentId).catch(() => {});
+  // What it does now, on the phone of the person behind it (ADR 0210).
+  if (chosen && wrote) await queueLiveActivityRun(deps.db, run).catch(() => {});
 }
 
 /** Jev's pick for a run as it starts (§8–9): a request of its own, beside the run, never in its way. */
@@ -677,15 +711,21 @@ export async function askRunStatus(
     message: string;
     recent: string[];
     candidates: StatusCandidate[];
+    /** Asked with the run's other start judgments (`JudgeGroup`). */
+    group?: JudgeGroup;
   },
 ): Promise<StatusPick | null> {
-  if (input.candidates.length === 0) return null;
+  if (input.candidates.length === 0) {
+    input.group?.skip("agent_status");
+    return null;
+  }
   const answers = await judge.ask({
     orgId: input.orgId,
     agentId: input.agentId,
     runId: input.runId,
     kind: "agent_status",
     calibrated: true,
+    ...(input.group ? { group: input.group } : {}),
     state: {
       agent: { name: input.agent.name, role: input.agent.role, instructions: cutText(input.agent.instructions, 1500) },
       message: cutText(input.message, 2000),
@@ -753,7 +793,7 @@ async function writeAutoLine(
 export async function followWork(
   deps: { db: Database; pubsub?: PubSub; judge?: Judge | null },
   ctx: Pick<ToolContext, "orgId" | "agentId" | "runId">,
-  tool: Pick<ToolDefinition, "name" | "scope" | "connectionId" | "connectorLabel">,
+  tool: Pick<ToolDefinition, "name" | "scope" | "connectionId" | "connectorLabel" | "ownerUserId">,
   now = new Date(),
 ): Promise<void> {
   if (!ctx.runId) return;
@@ -793,6 +833,7 @@ export async function followWork(
     const stale = still !== null && still < AGENT_LINE_STALE_BELOW;
     if (stale && (await writeAutoLine(deps, target, act, { now, keepOwn: false }))) {
       await announceAgentStatus(deps.pubsub, ctx.orgId, ctx.agentId).catch(() => {});
+      await queueLiveActivityRun(deps.db, target).catch(() => {});
     }
     return;
   }
@@ -809,6 +850,7 @@ export async function followWork(
   if (a.at && now.getTime() - a.at.getTime() < AGENT_LINE_EVERY_MS) return;
   if (await writeAutoLine(deps, target, act, { now, keepOwn: true })) {
     await announceAgentStatus(deps.pubsub, ctx.orgId, ctx.agentId).catch(() => {});
+    await queueLiveActivityRun(deps.db, { ...target, background: run?.background }).catch(() => {});
   }
 }
 
@@ -909,6 +951,8 @@ export function createSetStatusToolSource(deps: { pubsub?: PubSub } = {}): ToolS
         )
         .where(and(eq(agents.orgId, ctx.orgId), eq(agents.id, ctx.agentId)));
       await announceAgentStatus(deps.pubsub, ctx.orgId, ctx.agentId);
+      // Its own words, on the phone of the person behind its run (ADR 0210).
+      if (ctx.runId) await queueLiveActivityRun(ctx.db, { id: ctx.runId, orgId: ctx.orgId }).catch(() => {});
       return { content: text ? "Status set." : "Status cleared." };
     },
   };

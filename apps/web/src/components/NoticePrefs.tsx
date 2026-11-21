@@ -1,9 +1,11 @@
 import { type NoticeCategory, useNoticePrefs, useSetNoticePref } from "@agenteschat/client";
-import { Card, CardHeader, Chip, Icon, type IconName, InfoHint, Switch } from "@agenteschat/ui";
-import { cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
+import { Button, Card, CardHeader, Chip, Icon, type IconName, InfoHint, Switch } from "@agenteschat/ui";
+import { cloneElement, isValidElement, type ReactElement, type ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LoadingLine } from "@/components/Loading";
+import { OpenOnPhoneDialog } from "@/components/OpenOnPhone";
 import { useOrg } from "@/components/org-context";
+import { SurfacePrefRow } from "@/components/SurfaceLink";
 import { useBrowserNotices } from "@/components/WebPush";
 import { inDesktopApp } from "@/lib/desktop";
 import { useToast } from "@/lib/toast";
@@ -32,6 +34,7 @@ export function NoticePrefsSection() {
   const set = useSetNoticePref(org.id);
   const browser = useBrowserNotices();
   const phones = prefs.data?.phones ?? 0;
+  const [phoneCode, setPhoneCode] = useState(false);
 
   return (
     <>
@@ -59,8 +62,7 @@ export function NoticePrefsSection() {
             id="notice-phone"
             icon="phone"
             label={t("noticePrefs.phone")}
-            hint={phones > 0 ? t("noticePrefs.phoneOn") : undefined}
-            status={phones > 0 ? undefined : t("noticePrefs.phoneOff")}
+            hint={t(phones > 0 ? "noticePrefs.phoneOn" : "noticePrefs.phoneOff")}
             control={
               prefs.data &&
               (phones > 0 ? (
@@ -68,12 +70,16 @@ export function NoticePrefsSection() {
                   {t("noticePrefs.on")}
                 </Chip>
               ) : (
-                <Chip>{t("noticePrefs.off")}</Chip>
+                <Button size="sm" icon="phone" aria-label={t("shell.openOnPhone")} onClick={() => setPhoneCode(true)}>
+                  {t("noticePrefs.phoneOpen")}
+                </Button>
               ))
             }
           />
           <PrefRow id="notice-mac" icon="computerMac" label={t("noticePrefs.mac")} hint={t("noticePrefs.macHelp")} />
+          <SurfacePrefRow />
         </div>
+        <OpenOnPhoneDialog open={phoneCode} onClose={() => setPhoneCode(false)} />
       </Card>
 
       <Card aria-labelledby="notice-what">
@@ -142,7 +148,10 @@ export function PrefRow({
   hint?: ReactNode;
   /** What must stay in sight under the name: why the control is off, what it waits on, what the line opens to. */
   status?: ReactNode;
-  /** A value before the control (a plan's logo and name, a card's day and hour selects, who a switch is for). */
+  /**
+   * A value before the control (a plan's logo and name, a card's day and hour selects, who a switch is for). A line
+   * that opens something says its state in `status`: beside the name, a long one sends the chevron to a line of its own.
+   */
   value?: ReactNode;
   control?: ReactNode;
   /** In place of `control`: several controls or buttons, which wrap under the words rather than keep their place. */
@@ -151,6 +160,8 @@ export function PrefRow({
 }) {
   const { t } = useTranslation();
   const toggle = isValidElement(control) && control.type === Switch;
+  // One button (or the chip that stands for its outcome) keeps the name's line at every width (`.settings-row--button`).
+  const button = isValidElement(control) && (control.type === Button || control.type === Chip);
   const switchId = toggle ? ((control.props as { id?: string }).id ?? `${id}-switch`) : undefined;
   const described = [hint && !onOpen && `${id}-help`, status && `${id}-status`].filter(Boolean).join(" ");
   const end = toggle
@@ -226,7 +237,9 @@ export function PrefRow({
       className={
         toggle
           ? "settings-row ac-actrow settings-row--lead settings-row--toggle"
-          : "settings-row ac-actrow settings-row--lead"
+          : button
+            ? "settings-row ac-actrow settings-row--lead settings-row--button"
+            : "settings-row ac-actrow settings-row--lead"
       }
     >
       {body}

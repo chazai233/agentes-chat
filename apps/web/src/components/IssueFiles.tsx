@@ -9,9 +9,9 @@ import { useActors } from "@/components/actors";
 import { useArtifactDownload } from "@/components/artifacts/ArtifactActions";
 import { useArtifactViewer } from "@/components/artifacts/ArtifactViewer";
 import { DrivePreview } from "@/components/drive/DrivePreview";
-import { useFileDrop } from "@/components/drive/DriveUploads";
 import { useOrg } from "@/components/org-context";
 import { type PendingFile, useComposerFiles } from "@/hooks/useComposerFiles";
+import { useFileDrop } from "@/hooks/useFileDrop";
 
 /** A file of the task and where it came from ("Na criação · ontem às 17:40", "Comentário de Ana · …"). */
 export interface IssueFileEntry {
@@ -78,12 +78,17 @@ export function IssueFiles({ issue, activity }: { issue: Issue; activity: IssueA
   useEffect(() => {
     if (!doneIds || sending.current) return;
     sending.current = true;
+    const sent = adding.items.map((f) => f.key);
     action.mutate(
       { type: "comment", id: issue.id, text: "", attachmentIds: doneIds.split(",") },
       {
+        // Only what was in the box as it went: a file added meanwhile stays, and goes as the next comment. Refused,
+        // they all stay (the failed write has its toast): the next file added sends them again, × takes one out.
+        onSuccess: () => {
+          for (const key of sent) adding.remove(key);
+        },
         onSettled: () => {
           sending.current = false;
-          adding.clear();
         },
       },
     );

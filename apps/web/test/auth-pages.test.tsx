@@ -14,7 +14,7 @@ import { STORAGE_KEYS, storage } from "@/lib/storage";
 import { ADA_ID, createFakeApi, fakeMachinesOf, ORG_ID, seedState } from "./fake-api";
 import { createFakeAuth } from "./fake-auth";
 import { installTurnstile, removeTurnstile } from "./fake-turnstile";
-import { renderApp, screen, settle } from "./render";
+import { renderApp, screen, settle, showIn } from "./render";
 
 afterEach(() => {
   cleanup();
@@ -102,6 +102,36 @@ describe("the sign-in forms when the server doesn't answer", () => {
   });
 });
 
+describe("an account out of password tries", () => {
+  test("says when to try again, in minutes from the server's wait, never as a wrong password", async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json(
+        { code: "TOO_MANY_PASSWORD_TRIES", message: "Too many password tries for this account.", retryIn: 790 },
+        { status: 429, headers: { "retry-after": "790" } },
+      )) as unknown as typeof fetch;
+    try {
+      const { api } = authApi(ACCOUNT);
+      const { services } = await renderApp("/login", { api, auth: createBetterAuthClient("http://localhost:3000") });
+      await type("E-mail", "marina@example.com");
+      await press(/^Continuar(?! com)/);
+      await type("Senha", "correct horse");
+      await press(/^Entrar/);
+      expect(screen().getByRole("alert").textContent).toBe(
+        "Muitas tentativas de senha nesta conta. Tente de novo em 14 minutos.",
+      );
+      expect(heading()).toBe("Bom te ver de novo.");
+      await showIn(services, "en");
+      await press(/^Sign in/);
+      expect(screen().getByRole("alert").textContent).toBe(
+        "Too many password tries on this account. Try again in 14 minutes.",
+      );
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
 describe("Entrar (e-mail primeiro)", () => {
   test("the e-mail has a password: a wrong one frowns and offers a link; the right one enters", async () => {
     const state = seedState({ me: null });
@@ -135,7 +165,7 @@ describe("Entrar (e-mail primeiro)", () => {
 
     await type("Senha", "senha-errada");
     await press(/^Entrar/);
-    expect(heading()).toBe("Hmm, essa senha não bateu.");
+    expect(heading()).toBe("Essa senha não bateu.");
     // The field, Entrar and "Esqueci a senha" sit right under it: no line between.
     expect(lead()).toBeNull();
     expect(screen().getByLabelText("Senha").getAttribute("aria-invalid")).toBe("true");
@@ -156,11 +186,14 @@ describe("Entrar (e-mail primeiro)", () => {
     const { auth } = createFakeAuth({ onSignIn: () => (state.me = signedIn) });
     const { api } = authApi(ACCOUNT, { state });
     const target = `/org/${ORG_ID}/agents/${ADA_ID}?tab=settings&sec=budget`;
+    // Signed out by hand before: any sign-in here takes that mark away.
+    storage.set(STORAGE_KEYS.signedOut, "1");
     const { router } = await renderApp(`/login?redirect=${encodeURIComponent(target)}`, { api, auth });
     await type("E-mail", "marina@acme.com.br");
     await press(/^Continuar(?! com)/);
     await type("Senha", "correct horse");
     await press(/^Entrar/);
+    expect(storage.get(STORAGE_KEYS.signedOut)).toBeNull();
     expect(router.state.location.pathname).toBe(`/org/${ORG_ID}/agents/${ADA_ID}`);
     expect(router.state.location.search).toEqual({ tab: "settings", sec: "budget" });
   });
@@ -827,6 +860,23 @@ describe("Aceitar convite", () => {
     return { ...r, state };
   };
 
+  test("an invitation that gives a cargo and agents says them: the cargo in the hello, its agents as who works with you", async () => {
+    await openInvite({
+      roles: [{ name: "Suporte", color: "teal", icon: "headset" }],
+      yours: 1,
+      agents: [
+        { id: "agent-max", name: "Max", appearance: { color: "teal", eyes: "dots", accessory: "headset" } },
+        { id: ADA_ID, name: "Ada", appearance: { color: "amber", eyes: "dots", accessory: "beanie" } },
+      ],
+    });
+    expect(heading()).toBe("Oi. Ana chamou você para a Acme, como Suporte.");
+    const org = document.querySelector(".invite__org")?.textContent;
+    expect(org).toContain("Max vai trabalhar com você");
+    expect(org).not.toContain("trabalham lá");
+    // The invitation's first agent is the host.
+    expect(document.querySelector(".auth__ask .ac-avatar")?.getAttribute("data-accessory")).toBe("headset");
+  });
+
   test("a new address: its name, then a password; signing up accepts and opens the workspace", async () => {
     const { auth, calls } = createFakeAuth();
     // Opened from its email: the link carries the proof only the message has (ADR 0090).
@@ -945,7 +995,7 @@ describe("Aceitar convite", () => {
     expect(screen().getByRole("button", { name: /Continuar com GitHub/ })).toBeTruthy();
     await type("Senha", "senha-errada");
     await press("Entrar na Acme");
-    expect(heading()).toBe("Hmm, essa senha não bateu.");
+    expect(heading()).toBe("Essa senha não bateu.");
     expect(lead()).toBeNull();
     expect(screen().getByLabelText("Senha").getAttribute("aria-invalid")).toBe("true");
     expect(state.calls.some((c) => c.method === "orgs.acceptInvitation")).toBe(false);
@@ -1121,7 +1171,9 @@ describe("Aceitar convite", () => {
     await renderApp("/invite/old", { api: createFakeApi(state) });
     await settle(4);
     await press("Pedir um novo convite");
-    expect(screen().getByRole("alert").textContent).toMatch(/trocado por um convite mais novo ou cancelado/);
+    expect(screen().getByRole("alert").textContent).toMatch(
+      /Alguém pode ter cancelado este link ou mandado um convite mais novo/,
+    );
     expect(screen().queryByRole("button", { name: "Pedido enviado" })).toBeNull();
     expect(screen().getByRole("button", { name: "Pedir um novo convite" }).hasAttribute("disabled")).toBe(false);
   });
@@ -1431,6 +1483,9 @@ describe("Onboarding: the workspace's name", () => {
     await click(screen().getByRole("menuitem", { name: "Sair" }), 6);
     expect(authCalls.map((c) => c.method)).toEqual(["signOut"]);
     expect(router.state.location.pathname).toBe("/login");
+    // By hand: the desktop app's own server waits for its owner's click instead of signing them in again.
+    expect(storage.get(STORAGE_KEYS.signedOut)).toBe("1");
+    storage.remove(STORAGE_KEYS.signedOut);
   });
 
   test("where new workspaces take an invitation: says so, with whom to ask, and doesn't continue", async () => {

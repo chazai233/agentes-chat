@@ -20,6 +20,7 @@ import { caches } from "./cache";
 import { type Channel, requireChannelAccess } from "./channels";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "./errors";
 import { publishChannelEvent, publishMessageCreated, publishUserEvent } from "./events";
+import { pendingReturns } from "./follow-through";
 import { followsThreadSql, threadReadAtSql } from "./follows";
 import { landedAfterSql } from "./message-place";
 import { type PreviewMeta, previewMeta, readableBody } from "./message-preview";
@@ -28,7 +29,7 @@ import { pendingCommandsSql } from "./mission-command-rules";
 import { quietNoticeSql } from "./notices";
 import { can, type Membership, requirePermission } from "./organizations";
 import { maySql } from "./permissions";
-import { taskReaderSql } from "./task-access";
+import { fileConversationReaderSql, taskReaderSql } from "./task-access";
 
 const { threads, messages, channels, channelMembers } = schema;
 
@@ -139,6 +140,11 @@ export interface ThreadInfo {
   since: string | null;
   /** The agent of the run at it longest (working, else the one waiting): the chip's orbit takes its tones. */
   worker: string | null;
+  /**
+   * The soonest return still to come here (a `follow_up` an agent set, `pendingReturns`), not yet past its time: the
+   * chip's "Retorno às 00:32" when nothing else is on. Null: none.
+   */
+  laterAt: string | null;
   /**
    * Open, and a cheap model judged its matter done after its last message
    * (`threads.assess`): the app offers to close it. Cleared by a new message,
@@ -1226,17 +1232,26 @@ async function queryThreads(
   return { rows: page, nextCursor: more && tail ? encodeCursor(tail.cursor_at, tail.id) : null };
 }
 
-/** Distinct authors and the latest reply of each thread on the page (two queries for the whole page). */
-async function threadExtras(db: Database, orgId: string, rows: ThreadSqlRow[]) {
+/**
+ * Distinct authors, the latest reply and the soonest return still to come (for `userId`) of each thread on the page:
+ * three queries for the whole page.
+ */
+async function threadExtras(db: Database, orgId: string, userId: string, rows: ThreadSqlRow[]) {
   const ids = rows.map((r) => r.id);
-  if (ids.length === 0) return { authors: new Map<string, Actor[]>(), latest: new Map<string, Message>() };
+  if (ids.length === 0)
+    return {
+      authors: new Map<string, Actor[]>(),
+      latest: new Map<string, Message>(),
+      later: new Map<string, string>(),
+    };
+  const channelIds = new Set(rows.map((r) => r.channel_id));
   const scope = and(
     eq(messages.orgId, orgId),
     inArray(messages.threadId, ids),
     isNull(messages.deletedAt),
     sql`not ${quietNoticeSql(sql`${messages.meta}`)}`,
   );
-  const [authorRows, latestRows] = await Promise.all([
+  const [authorRows, latestRows, returns] = await Promise.all([
     db
       .selectDistinct({
         threadId: messages.threadId,
@@ -1252,7 +1267,11 @@ async function threadExtras(db: Database, orgId: string, rows: ThreadSqlRow[]) {
       // The reply, not the agent's sticker or GIF after it (ADR 0091).
       .where(and(scope, sql`${messages.meta}->>'mediaAfter' is null`))
       .orderBy(messages.threadId, desc(messages.createdAt), desc(messages.id)),
+    pendingReturns(db, userId, orgId, channelIds.size === 1 ? { channelId: [...channelIds][0] } : {}),
   ]);
+  // Soonest first: each thread keeps its first one still ahead (a held one says its wait in the thread's bar).
+  const later = new Map<string, string>();
+  for (const r of returns) if (r.threadId && !r.held && !later.has(r.threadId)) later.set(r.threadId, r.at);
   const authors = new Map<string, Actor[]>();
   const push = (threadId: string, a: Actor) => {
     if (!a.id) return;
@@ -1268,7 +1287,7 @@ async function threadExtras(db: Database, orgId: string, rows: ThreadSqlRow[]) {
     push(a.threadId, { type: a.authorType, id: a.authorType === "person" ? a.userId : a.agentId });
   }
   const latest = new Map(latestRows.map((m) => [m.threadId ?? "", m]));
-  return { authors, latest };
+  return { authors, latest, later };
 }
 
 function toView(
@@ -1318,6 +1337,7 @@ function toView(
     working: r.working === true,
     needsYou: r.needs_you === true,
     ...threadWork(r),
+    laterAt: extras.later.get(r.id) ?? null,
     suggestedResolved: r.suggested_resolved === true,
     canManage: r.created_by === userId || (r.author_type === "person" && r.author_user_id === userId) || isAdmin,
     following: r.following === true,
@@ -1352,7 +1372,7 @@ export async function listThreads(
   if (input.channelId) await requireChannelAccess(db, actorId, input.orgId, input.channelId);
   const isAdmin = can(membership, "manage_channels");
   const { rows, nextCursor } = await queryThreads(db, actorId, input);
-  const extras = await threadExtras(db, input.orgId, rows);
+  const extras = await threadExtras(db, input.orgId, actorId, rows);
   return { threads: rows.map((r) => toView(r, extras, actorId, isAdmin)), nextCursor };
 }
 
@@ -1409,9 +1429,9 @@ export async function getThread(db: Database, actorId: string, orgId: string, ro
       following: await followsRoot(db, orgId, actorId, root.id),
       cursor_at: root.createdAt.toISOString(),
     };
-    return toView(r, await threadExtras(db, orgId, [r]), actorId, isAdmin);
+    return toView(r, await threadExtras(db, orgId, actorId, [r]), actorId, isAdmin);
   }
-  return toView(found, await threadExtras(db, orgId, rows), actorId, isAdmin);
+  return toView(found, await threadExtras(db, orgId, actorId, rows), actorId, isAdmin);
 }
 
 /** What everyone may hear of a thread: nothing only the actor has (following it, its unread for them). */
@@ -1475,7 +1495,7 @@ function unreadReplySql(orgId: string, userId: string, root: SQL, joinedAt: SQL)
     and (ur.author_user_id is null or ur.author_user_id <> ${userId})
     and not ${quietNoticeSql(sql`ur.meta`)} and ur.meta->>'mediaAfter' is null
     and ${landedAfterSql({ createdAt: sql`ur.created_at`, id: sql`ur.id` }, sql`greatest(${joinedAt}, ${threadReadAtSql(userId, root)})`)}
-    and not exists (select 1 from ${threads} mt where mt.root_message_id = ${root}
+    and not exists (select 1 from ${threads} mt where mt.org_id = ${orgId}::uuid and mt.root_message_id = ${root}
       and ur.id = any(mt.context_moved_message_ids))`;
 }
 
@@ -1554,6 +1574,41 @@ export async function unreadTaskConversations(db: Database, userId: string, orgI
   );
   return rows.map((r) => ({
     issueId: r.id,
+    unread: Number(r.following === true ? r.n : r.m),
+    mentions: Number(r.m),
+  }));
+}
+
+/** A live file's conversation with something I haven't read (ADR 0199): replies, and of them those that mention me. */
+export interface UnreadFile {
+  artifactId: string;
+  /** Replies I haven't read: every one in a conversation I follow, else only those that mention me. */
+  unread: number;
+  mentions: number;
+}
+
+/**
+ * The live files whose conversation has a reply I haven't read, by the threads' rule (`unreadReplySql`, at most
+ * `MAX_THREAD_UNREAD` each), only where I read the file now (`unreadTaskConversations` for files): people are never
+ * members of a file's channel, and a mention counts until I read it there.
+ */
+export async function unreadFileConversations(db: Database, userId: string, orgId: string): Promise<UnreadFile[]> {
+  await requirePermission(db, userId, orgId, "read");
+  const rows = rowsOf<{ id: string; following: boolean; n: number | string; m: number | string }>(
+    await db.execute(sql`select fa.id, f.following, u.n, u.m from ${schema.artifacts} fa
+        cross join lateral (select ${followsThreadSql(orgId, userId, sql`fa.conversation_root_id`)} as following) f
+        cross join lateral (select count(*)::int as n,
+            count(*) filter (where ${userId} = any(ur.mentioned_user_ids))::int as m
+          from (select ur.mentioned_user_ids from ${messages} ur
+            where ${unreadReplySql(orgId, userId, sql`fa.conversation_root_id`, sql`'-infinity'::timestamptz`)}
+            limit ${MAX_THREAD_UNREAD}) ur) u
+        where fa.org_id = ${orgId}::uuid and fa.conversation_channel_id is not null
+          and fa.conversation_root_id is not null and fa.deleted_at is null
+          and (u.m > 0 or (f.following and u.n > 0))
+          and ${fileConversationReaderSql(sql`fa.conversation_channel_id`, sql`${userId}`)}`),
+  );
+  return rows.map((r) => ({
+    artifactId: r.id,
     unread: Number(r.following === true ? r.n : r.m),
     mentions: Number(r.m),
   }));

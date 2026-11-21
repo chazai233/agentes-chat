@@ -8,6 +8,32 @@ import type { TFunction } from "i18next";
  */
 
 /**
+ * Intl's formatters, made once per language and options: making one costs far more than using it, and these run for
+ * every row drawn. One that can't be made throws, as `new` does, and isn't kept. A date's formatter without its own
+ * `timeZone` is kept per the device's offset now, so a phone that changed zones formats in the new one.
+ */
+const formatters = new Map<string, Intl.DateTimeFormat | Intl.NumberFormat>();
+
+function made<T extends Intl.DateTimeFormat | Intl.NumberFormat>(key: string, make: () => T): T {
+  const found = formatters.get(key) as T | undefined;
+  if (found) return found;
+  const fresh = make();
+  formatters.set(key, fresh);
+  return fresh;
+}
+
+/** `new Intl.DateTimeFormat(locale, options)`, kept (see `formatters`). */
+export const dateFormat = (locale: string | undefined, options: Intl.DateTimeFormatOptions = {}) =>
+  made(
+    `d|${locale}|${options.timeZone ? "" : new Date().getTimezoneOffset()}|${JSON.stringify(options)}`,
+    () => new Intl.DateTimeFormat(locale, options),
+  );
+
+/** `new Intl.NumberFormat(locale, options)`, kept (see `formatters`). */
+export const numberFormat = (locale: string, options: Intl.NumberFormatOptions = {}) =>
+  made(`n|${locale}|${JSON.stringify(options)}`, () => new Intl.NumberFormat(locale, options));
+
+/**
  * Dollars as the language writes them ("$0.42", "US$ 0,42", "0,42 $"), with more decimals for tiny amounts (a few
  * Jev decisions' 0.0003); a spend too small for 4 decimals reads "<$0.0001", like formatPercent's "<1%", never zero.
  */
@@ -19,33 +45,40 @@ export function formatUsd(locale: string, value: number) {
 /** Budget use: "37,5%", "12%", "<1%" (members never see money, only this). */
 export function formatPercent(locale: string, value: number) {
   const fmt = (v: number, digits: number) =>
-    new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: digits }).format(v / 100);
+    numberFormat(locale, { style: "percent", maximumFractionDigits: digits }).format(v / 100);
   if (value > 0 && value < 1) return `<${fmt(1, 0)}`;
   return fmt(value, value < 10 ? 1 : 0);
 }
 
 /** "1.240" */
-export const formatInt = (locale: string, value: number) => new Intl.NumberFormat(locale).format(Math.round(value));
+export const formatInt = (locale: string, value: number) => numberFormat(locale).format(Math.round(value));
 
 /** "0,042" / "0.0001": a price of a fraction of a cent, in the locale's decimal sign. */
 export const formatDecimal = (locale: string, value: number) =>
-  new Intl.NumberFormat(locale, { maximumFractionDigits: 4 }).format(value);
+  numberFormat(locale, { maximumFractionDigits: 4 }).format(value);
 
 /** "3,1 mi" / "12 mil" / "940" */
 export function formatTokensShort(t: TFunction, locale: string, value: number) {
-  const fmt = (v: number) => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(v);
+  const fmt = (v: number) => numberFormat(locale, { maximumFractionDigits: 1 }).format(v);
   if (value >= 1_000_000) return t("format.tokensMillions", { value: fmt(value / 1_000_000) });
   if (value >= 10_000) return t("format.tokensThousands", { value: fmt(value / 1_000) });
   return formatInt(locale, value);
 }
 
-/** Whether the locale writes 12-hour times ("1 PM") rather than 24-hour ("13:00"). */
+const twelveHour = new Map<string, boolean>();
+
+/** Whether the locale writes 12-hour times ("1 PM") rather than 24-hour ("13:00"). Asked twice per time drawn: kept. */
 export function uses12h(locale: string) {
-  try {
-    return new Intl.DateTimeFormat(locale, { hour: "numeric" }).resolvedOptions().hour12 === true;
-  } catch {
-    return false;
+  let found = twelveHour.get(locale);
+  if (found === undefined) {
+    try {
+      found = new Intl.DateTimeFormat(locale, { hour: "numeric" }).resolvedOptions().hour12 === true;
+    } catch {
+      found = false;
+    }
+    twelveHour.set(locale, found);
   }
+  return found;
 }
 
 /**
@@ -56,7 +89,21 @@ export const clockHour = (locale: string): "numeric" | "2-digit" => (uses12h(loc
 
 /** "10:42", "8:39 PM" */
 export const formatTime = (locale: string, iso: string) =>
-  new Intl.DateTimeFormat(locale, { hour: clockHour(locale), minute: "2-digit" }).format(new Date(iso));
+  dateFormat(locale, { hour: clockHour(locale), minute: "2-digit" }).format(new Date(iso));
+
+/**
+ * The clock alone, without its day period: "8:39" for "8:39 PM", "1:32" for "오후 1:32", "10:42" in 24-hour
+ * locales. For a column too narrow for "PM" on the same line (a grouped message's gutter, under a turn whose header
+ * says the whole time).
+ */
+export function formatClock(locale: string, iso: string) {
+  const parts = dateFormat(locale, { hour: clockHour(locale), minute: "2-digit" }).formatToParts(new Date(iso));
+  const digits = parts.flatMap((p, i) => (p.type === "hour" || p.type === "minute" ? [i] : []));
+  return parts
+    .slice(digits[0], (digits.at(-1) ?? parts.length - 1) + 1)
+    .map((p) => p.value)
+    .join("");
+}
 
 /** "14:05" today, "24 out 14:05" another day (a pause's end, when a computer went offline). */
 export const clockAt = (locale: string, iso: string, now = new Date()) =>
@@ -67,7 +114,7 @@ export const clockAt = (locale: string, iso: string, now = new Date()) =>
  * the short month without its period and without the "de" Portuguese and Spanish put around it.
  */
 export const formatShortDate = (locale: string, iso: string, year = false) =>
-  new Intl.DateTimeFormat(locale, { day: "numeric", month: "short", ...(year ? { year: "numeric" } : {}) })
+  dateFormat(locale, { day: "numeric", month: "short", ...(year ? { year: "numeric" } : {}) })
     .formatToParts(new Date(iso))
     .map((p) =>
       p.type === "month" ? p.value.replace(/\.$/, "") : p.type === "literal" ? p.value.replace(/^ de $/, " ") : p.value,
@@ -75,12 +122,11 @@ export const formatShortDate = (locale: string, iso: string, year = false) =>
     .join("");
 
 /** "outubro" */
-export const formatMonth = (locale: string, date: Date) =>
-  new Intl.DateTimeFormat(locale, { month: "long" }).format(date);
+export const formatMonth = (locale: string, date: Date) => dateFormat(locale, { month: "long" }).format(date);
 
 /** "março de 2026" */
 export const formatMonthYear = (locale: string, iso: string) =>
-  new Intl.DateTimeFormat(locale, { month: "long", year: "numeric" }).format(new Date(iso));
+  dateFormat(locale, { month: "long", year: "numeric" }).format(new Date(iso));
 
 const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 
@@ -117,7 +163,7 @@ export const lowerFirst = (s: string, locale?: string) =>
 
 /** "Segunda-feira" */
 export const formatWeekday = (locale: string, iso: string) =>
-  capitalize(new Intl.DateTimeFormat(locale, { weekday: "long" }).format(new Date(iso)));
+  capitalize(dateFormat(locale, { weekday: "long" }).format(new Date(iso)));
 
 /** Day divider label: "Hoje", "Ontem", a weekday within the week ("Segunda-feira"), "12 out", "12 out 2025". */
 export function dayLabel(t: TFunction, locale: string, iso: string, now = new Date()) {
@@ -146,10 +192,18 @@ const RELATIVE_DAYS: Record<AppLocale, readonly [string, string, string]> = {
   ru: ["вчера", "сегодня", "завтра"],
 };
 
+const relativeFormats = new Map<string, Intl.RelativeTimeFormat>();
+
 /** "ontem", "today", "明日": the language's word for the day `offset` (-1, 0, 1) away, lowercase where it writes it so. */
 export function relativeDay(locale: string, offset: -1 | 0 | 1): string {
-  if (typeof Intl.RelativeTimeFormat === "function")
-    return new Intl.RelativeTimeFormat(locale, { numeric: "auto" }).format(offset, "day");
+  if (typeof Intl.RelativeTimeFormat === "function") {
+    let rtf = relativeFormats.get(locale);
+    if (!rtf) {
+      rtf = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
+      relativeFormats.set(locale, rtf);
+    }
+    return rtf.format(offset, "day");
+  }
   return RELATIVE_DAYS[appLocale([locale], true) ?? "en"][offset + 1] as string;
 }
 
@@ -164,7 +218,7 @@ export function ordinalForm(locale: string, n: number): Intl.LDMLPluralRule {
 
 /** "terça-feira, 14 de outubro de 2026 às 21:10" (tooltip on a message's time). */
 export const formatFullDate = (locale: string, iso: string) =>
-  new Intl.DateTimeFormat(locale, { dateStyle: "full", timeStyle: "short" }).format(new Date(iso));
+  dateFormat(locale, { dateStyle: "full", timeStyle: "short" }).format(new Date(iso));
 
 /** "agora", "há 2 min", "há 3 h", "ontem", "12 out". */
 export function relativeTime(t: TFunction, locale: string, iso: string, now = new Date()) {
@@ -224,7 +278,7 @@ export function sentAtLine(t: TFunction, locale: string, iso: string, now = new 
 
 /** A time ahead, weekday and time on this device's clock: "seg 20 out, 09:00". */
 export const nextLabel = (locale: string, iso: string) =>
-  new Intl.DateTimeFormat(locale, {
+  dateFormat(locale, {
     weekday: "short",
     day: "numeric",
     month: "short",
@@ -241,8 +295,7 @@ export function upcomingAt(t: TFunction, locale: string, iso: string, now = new 
   const time = formatTime(locale, iso);
   if (days <= 0) return t("format.todayAt", { time });
   if (days === 1) return t("format.tomorrowAt", { time });
-  if (days < 7)
-    return `${new Intl.DateTimeFormat(locale, { weekday: "short" }).format(new Date(iso)).replace(/\.$/, "")} ${time}`;
+  if (days < 7) return `${dateFormat(locale, { weekday: "short" }).format(new Date(iso)).replace(/\.$/, "")} ${time}`;
   return formatShortDate(locale, iso);
 }
 
@@ -257,6 +310,12 @@ export function timeLeft(t: TFunction, iso: string, now = new Date()) {
   return t("format.inDays", { count: Math.round(hours / 24) });
 }
 
+/**
+ * A name set apart from the words around it (U+2068 … U+2069), so a right-to-left name keeps its own order inside a
+ * left-to-right line ("Pessoal de …"), and the other way round.
+ */
+export const isolate = (name: string) => `\u2068${name}\u2069`;
+
 /** "Ana" for "Ana Souza". */
 export const firstName = (name: string) => name.trim().split(/\s+/)[0] ?? "";
 
@@ -266,6 +325,9 @@ export const emailName = (email: string) => email.split("@")[0] || email;
 /** "Ada, Atlas, and Theo", "Ada, Atlas e Theo", "Ada、Atlas、Theo": the language's own list (Intl.ListFormat), in `t`'s language. */
 export const joinNames = (names: readonly string[], t: TFunction): string => t("format.list", { names });
 
+/** A name held whole in running text ("#chamados-urgentes"): its hyphens never break the line (U+2011). */
+export const heldWhole = (name: string) => name.replaceAll("-", "\u2011");
+
 /** How many names a list of a team says before "and N more" (`namesText`): a ready-made team's four, whole. */
 export const NAMES_SHOWN = 4;
 
@@ -274,6 +336,23 @@ export function namesText(t: TFunction, names: string[], max = 2, total = names.
   const shown = names.slice(0, max);
   if (total <= shown.length) return joinNames(shown, t);
   return joinNames([...shown, t("notifications.namesMore", { count: total - shown.length })], t);
+}
+
+/** How many agents a roster (`rosterText`) names, one per line, before "and N more". */
+export const ROSTER_SHOWN = 8;
+
+/** "Ana · Designer" per line, the first `max` of them, then "e mais 3": a team to read in a tip. */
+export function rosterText(
+  t: TFunction,
+  agents: readonly { name: string; role?: string | null }[],
+  max = ROSTER_SHOWN,
+) {
+  // A name often carries its role already ("Lumen · Tradutora"): it isn't said twice.
+  const lines = agents
+    .slice(0, max)
+    .map((a) => (a.role && !a.name.includes(a.role) ? `${a.name} · ${a.role}` : a.name));
+  if (agents.length > max) lines.push(t("format.andMore", { count: agents.length - max }));
+  return lines.join("\n");
 }
 
 /** Short model label for message meta: "Claude Sonnet 5.5" → "sonnet 5.5". */
@@ -350,7 +429,7 @@ export function shortTarget(text: string, max = 40) {
 /** "1,2 s", "760 ms", "22 min", "1,5 h": a line's time, finer than the block's (and the work states' one clock). */
 export function formatLineTime(locale: string, ms: number) {
   if (ms < 1000) return `${Math.max(1, Math.round(ms))} ms`;
-  if (ms < 60_000) return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(ms / 1000)} s`;
+  if (ms < 60_000) return `${numberFormat(locale, { maximumFractionDigits: 1 }).format(ms / 1000)} s`;
   if (ms < 3600_000) return `${Math.round(ms / 60_000)} min`;
-  return `${new Intl.NumberFormat(locale, { maximumFractionDigits: ms < 10 * 3600_000 ? 1 : 0 }).format(ms / 3600_000)} h`;
+  return `${numberFormat(locale, { maximumFractionDigits: ms < 10 * 3600_000 ? 1 : 0 }).format(ms / 3600_000)} h`;
 }

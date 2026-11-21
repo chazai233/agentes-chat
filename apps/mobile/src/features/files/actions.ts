@@ -7,24 +7,20 @@ import { useToast } from "@/ui";
 import { router } from "@/ui/navigation";
 import { useOrgId, useWhen } from "../shared/hooks";
 import { whenKind } from "../shared/logic";
-import { showActionSheet } from "../shared/PickerSheet";
 import { successHaptic } from "../shared/parts";
-import { fileInfo } from "./logic";
-import { useFileLine } from "./MessageFiles";
-import { openInDrive, openWithApp, saveToDevice, saveToPhotos, shareFile } from "./source";
+import { openInDrive, saveToPhotos, shareFile } from "./source";
 
 /**
- * One file's actions with their toasts, one at a time: Download (a copy on the phone), Open in another app, Send to…
- * (the system's share sheet with the file), Save to Photos, Sharing settings (who sees it and its link, ADR 0157) and
- * View in Drive.
+ * Compartilhar (who sees it and its link, ADR 0157), Enviar cópia (the system's share sheet with the file), Salvar
+ * em Fotos and Ver no Drive for one file, with their toasts; one at a time. The file screen and the picture viewer
+ * both use these, under the same words and icons.
  */
 export function useFileActions(detail: ArtifactDetail | undefined) {
   const { t } = useTranslation();
   const api = useApi();
   const orgId = useOrgId();
   const toast = useToast();
-  const line = useFileLine();
-  const [busy, setBusy] = useState<"share" | "photos" | "download" | "open" | null>(null);
+  const [busy, setBusy] = useState<"share" | "photos" | null>(null);
 
   const share = async () => {
     if (!detail || busy) return;
@@ -59,34 +55,6 @@ export function useFileActions(detail: ArtifactDetail | undefined) {
     }
   };
 
-  const download = async () => {
-    if (!detail || busy) return;
-    setBusy("download");
-    try {
-      const folder = await saveToDevice(api, orgId, detail);
-      if (folder !== null) {
-        successHaptic();
-        toast({ title: t("mobile.files.downloaded", { folder }), icon: "download" });
-      }
-    } catch {
-      toast({ title: t("mobile.files.downloadFailed"), icon: "x" });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const openWith = async () => {
-    if (!detail || busy) return;
-    setBusy("open");
-    try {
-      if (!(await openWithApp(api, orgId, detail))) toast({ title: t("mobile.files.noApp"), icon: "x" });
-    } catch {
-      toast({ title: t("mobile.files.loadFailed"), icon: "x" });
-    } finally {
-      setBusy(null);
-    }
-  };
-
   const drive = () => {
     if (!detail) return;
     openInDrive(orgId, detail).catch(() => toast({ title: t("mobile.files.loadFailed"), icon: "x" }));
@@ -96,32 +64,7 @@ export function useFileActions(detail: ArtifactDetail | undefined) {
     if (detail) router.push({ pathname: "/file-share", params: { id: detail.id } });
   };
 
-  /**
-   * The "…" of the top bar: every action in the app's own sheet (the system's dialog on Android holds three buttons
-   * and can't be closed by a tap outside), the file's name and "PDF · 2.3 MB" over them.
-   */
-  const more = (withPhotos: boolean) => {
-    if (!detail) return;
-    const info = fileInfo(detail);
-    showActionSheet(
-      info.name,
-      [
-        { label: t("mobile.files.download"), icon: "download", onPress: () => void download() },
-        { label: t("mobile.files.openWith"), icon: "openApp", onPress: () => void openWith() },
-        { label: t("mobile.files.sendTo"), icon: "share", onPress: () => void share() },
-        ...(withPhotos
-          ? [{ label: t("mobile.files.savePhotos"), icon: "photos" as const, onPress: () => void savePhotos() }]
-          : []),
-        ...(detail.inDrive !== false
-          ? [{ label: t("mobile.files.shareSettings"), icon: "person" as const, onPress: shareSheet }]
-          : []),
-        { label: t("mobile.files.drive"), icon: "drive", onPress: drive },
-      ],
-      line(info),
-    );
-  };
-
-  return { share, shareSheet, savePhotos, download, openWith, drive, more, busy };
+  return { share, shareSheet, savePhotos, drive, busy };
 }
 
 /** "hoje 10:03", "ontem 18:20", "12 de out. 09:15": when the file was saved. */

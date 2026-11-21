@@ -15,7 +15,10 @@ import {
 } from "@agenteschat/db";
 import { modelInfo } from "@agenteschat/providers";
 import { recordAgentActions } from "../agent-actions";
+import { handleOf } from "../agents";
+import { othersEditAgent } from "../audience";
 import { steeredByOthers } from "../authority";
+import { isConfidentialRun, threadIsConfidential } from "../confidential";
 import { callLine, type LearnSignal, type RunCall, runCalls } from "../continuation";
 import { cutText, cutTextEnd } from "../format";
 import { agentBudgetState } from "../gateway";
@@ -122,7 +125,7 @@ export const learnTags = (agent: {
 // ── Trust ────────────────────────────────────────────────────────────────────
 
 /** Tools whose results are someone else's words: the web, pages, mail. */
-const OUTSIDE_TOOLS = new Set(["web_search", "web_fetch"]);
+const OUTSIDE_TOOLS = new Set(["web_search", "web_fetch", "image_search"]);
 /** The envelopes outside content reaches a model in (MCP and connector answers, pages, mail, databases). */
 const OUTSIDE_MARK = /<\s*(?:external_data|page_content|email_content|database_rows|untrusted_data)\b/i;
 
@@ -166,6 +169,23 @@ const OTHERS_WORDS = new Set([
   "ask_agent",
 ]);
 
+/** A teammate's instructions this run read (`read_agent`) that someone besides `person` may have written. */
+async function readOthersInstructions(db: Database, orgId: string, person: string, calls: RunCall[]) {
+  const handles = calls
+    .filter((c) => c.name === "read_agent" && !c.result?.isError)
+    .map((c) => handleOf(String((c.input as { agent?: unknown } | null)?.agent ?? "").trim()));
+  if (handles.length === 0) return false;
+  const read = await db
+    .select({
+      ownerUserId: agents.ownerUserId,
+      editorUserIds: agents.editorUserIds,
+      editorRoleIds: agents.editorRoleIds,
+    })
+    .from(agents)
+    .where(and(eq(agents.orgId, orgId), inArray(agents.handle, handles)));
+  return read.some((a) => othersEditAgent(a, person));
+}
+
 /**
  * The person whose own words this run answers, when it may act on them with no card (ADR 0092 §5, amended): it is high
  * trust, the message that started it is theirs (not a colleague's or a notice's), nobody else wrote into it or answered
@@ -185,6 +205,7 @@ export async function ownWords(
   if (trigger?.authorUserId !== person) return null;
   const calls = await runCalls(ctx.db, { id: ctx.runId, orgId: ctx.orgId });
   if (calls.some((c) => OTHERS_WORDS.has(c.name))) return null;
+  if (await readOthersInstructions(ctx.db, ctx.orgId, person, calls)) return null;
   const [answered] = await ctx.db
     .select({ id: agentQuestions.id })
     .from(agentQuestions)
@@ -197,7 +218,7 @@ export async function ownWords(
 // ── At turn end ──────────────────────────────────────────────────────────────
 
 /** Tool calls that already wrote memory: the run kept what it learned itself. */
-const WROTE_MEMORY = new Set(["remember", "save_how_to", "update_memory", "update_skill"]);
+const WROTE_MEMORY = new Set(["remember", "save_how_to", "update_memory", "update_skill", "create_skill"]);
 
 type EndedRun = { id: string; orgId: string; agentId: string; channelId: string; threadRootId: string };
 
@@ -214,6 +235,8 @@ export async function afterTurnDone(
 ) {
   try {
     const { db } = deps;
+    // Nothing is learned from a run of a confidential thread (ADR 0190): the job's model would read what it read.
+    if (isConfidentialRun(run.id)) return false;
     const cfg = learnConfig(deps);
     const [calls, { ids: usedHowTos, counted }] = await Promise.all([runCalls(db, run), injectedHowTos(db, run)]);
     // Once per run, however many turns it ends: a run that took more messages is still one reuse.
@@ -292,13 +315,13 @@ async function jobsToday(db: Executor, agentId: string) {
 
 const LEARN_SYSTEM = [
   "You keep the memory of an AI agent that works in a team of people and agents. Read one finished turn of its work and extract what is worth keeping for next time, as JSON.",
-  'Kinds: how_to (a way it worked out and will reuse: the exact address, command, parameters, script path; steps first), preference (how a person wants things done), fact (a lasting fact about the company, its business or its people), decision, lesson (what to do differently, or keep doing), term (a word or name the team uses, and what it means), access (who in the team holds which access: an agent signed in to a service in its browser, given a login, a key, a connector or a mailbox, or a person or agent named as who handles a service; key: the holder\'s @handle or name, then the service, as in "@ana stripe dashboard"; content: who holds it and how, as in "@ana is signed in to the Stripe dashboard in its browser as ana@example.com"; one that was lost is an access too, saying so).',
+  'Kinds: how_to (a way it worked out and will reuse: the exact address, command, parameters, script path; steps first), preference (how a person wants things done), fact (a lasting fact about the company, its business or its people), decision, lesson (what to do differently, or keep doing), term (a word or name the team uses, and what it means), access (who in the team holds which access: an agent signed in to a service in its browser, given a login, a key, a connector or a mailbox, or a person or agent named as who handles a service; key: the holder\'s @handle or name, then the service, as in "@ana stripe dashboard"; content: who holds it and how, as in "@ana is signed in to the Stripe dashboard in its browser as ana@example.com"; one that was lost is an access too, saying so; how this agent reaches a system is an access too: host, port, user and the path of a key file on its own computer, key "@its-handle ssh host", as in "@ana reaches vps.example.com over SSH on port 2222 as deploy with the key at ~/.ssh/vps").',
   "How its systems work (where code lives, which file does what, how a tool behaves) is a how_to or a lesson, never a fact.",
   'title: one plain line a person who doesn\'t code understands, in the language the people in the conversation write, with no paths, code or ids ("Como gravar senhas no Supabase sem expô-las"); content holds the technical detail. key: a short stable name for what it is about, in English, technical words welcome ("supabase secrets storage"; for a term, the term itself): the same thing learned again gets the same key, two different things never share one.',
   "Scope: own (only this agent), team (how the team works), workspace (everyone should know), person (one person's own preference: give their name as it appears in the messages in about_person).",
   "Ground everything: cite refs (m1… messages, s1… tool calls) for each item. Never infer traits, roles, moods or preferences. A one-off request is not a standing preference. If unsure, leave it out.",
   'Write each item as a statement of fact ("Ana prefers reports in Portuguese"), never as an order ("Always write in Portuguese").',
-  "Do not keep: environment failures, negative claims about tools, errors that resolved, one-off stories, a failure that was never solved written up as a method, secrets or where they are kept. For a setup failure, keep the fix. A how-to that needs a credential says only which key it needs from a person (request_secret).",
+  "Do not keep: environment failures, negative claims about tools, errors that resolved, one-off stories, a failure that was never solved written up as a method, a secret's value (a password, a token, a key's contents). How to reach a system is not a secret: keep its host, port, user and the path of a key file on the agent's own computer as an access. For a setup failure, keep the fix. A how-to that needs a credential says only which key it needs from a person (request_secret).",
   "Lessons: steps first; a pitfall is a general rule plus a short why; no ids or dates; the same lesson twice is one rule.",
   "skill_fixes: only for a skill listed as loaded in this turn that was wrong, missing a step or hit a pitfall the turn worked around; the full corrected body.",
   "Most turns that reach you have something worth keeping, but an empty list is a valid answer.",
@@ -401,7 +424,16 @@ function parseLearnOutput(text: string): { items: LearnedItem[]; skillFixes: { s
 
 export interface LearnResult {
   /** `running`: the run took more messages after the turn that queued this; the job retries (`jobs.ts`). */
-  skipped?: "missing" | "cap_reached" | "busy" | "running" | "budget" | "no_model" | "model_failed" | "right_hand";
+  skipped?:
+    | "missing"
+    | "cap_reached"
+    | "busy"
+    | "running"
+    | "budget"
+    | "no_model"
+    | "model_failed"
+    | "right_hand"
+    | "confidential";
   saved: { id: string; action: string; trust: string; scopeType: string }[];
   rejected: { content: string; reason: "no_sources" | "secret" | "refused" }[];
   skills: { slug: string; action: string }[];
@@ -449,6 +481,8 @@ export async function learnRun(deps: ContextDeps, input: { orgId: string; runId:
     )
     .limit(1);
   if (busy) return { ...out, skipped: "busy" };
+  // Queued by a turn that ended before the thread turned confidential (ADR 0190): the job reads the whole run.
+  if (await threadIsConfidential(db, run.orgId, run.threadRootId)) return { ...out, skipped: "confidential" };
   const [agent] = await db.select().from(agents).where(eq(agents.id, run.agentId));
   if (!agent || agent.archivedAt) return { ...out, skipped: "missing" };
   // Nothing is learned from its runs for the team (ADR 0137): it keeps only what it saves for the person it answers.

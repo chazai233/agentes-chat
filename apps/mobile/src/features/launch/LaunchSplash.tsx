@@ -19,7 +19,8 @@ import { effectOf } from "@/sky/Dither";
 import { paletteUniform } from "@/sky/math";
 import { Text } from "@/ui";
 import { fonts, useReducedMotion, useTheme } from "@/ui/theme";
-import { BRAND, LAUNCH, LOGO, launchSkyTones, NATIVE_IMAGE, waitLine } from "./logic";
+import { markRevealed } from "./launched";
+import { BRAND, LAUNCH, LOGO, launchesAtOnce, launchSkyTones, NATIVE_IMAGE, waitLine } from "./logic";
 
 /** The agent's canvas: room around the body for the turn and the breath. */
 const BOX = Math.ceil(LOGO * 1.5);
@@ -59,6 +60,9 @@ export interface LaunchSplashProps {
  * doesn't answer) the agent goes up and closes its eyes, the sprites keep above the panel that comes in at the
  * bottom, and the splash stays until the app is ready. Reduced motion: the logo still, a short fade.
  */
+/** The handover into the app, in seconds (this fork's own exit: the agent lifts away as the sky sinks). */
+const EXIT_S = 0.55;
+
 export function LaunchSplash({ ready, fontsReady, onShown, onDone, waiting, dusk = false }: LaunchSplashProps) {
   const { t } = useTranslation();
   const { colors: c, scheme } = useTheme();
@@ -71,6 +75,7 @@ export function LaunchSplash({ ready, fontsReady, onShown, onDone, waiting, dusk
   // Its own timers (the agents' clock can start paused): the minimum, and when to say why it waits.
   const [played, setPlayed] = useState(reduced);
   const [late, setLate] = useState(false);
+  const startedAt = useRef(Date.now()).current;
   useEffect(() => {
     const min = setTimeout(() => setPlayed(true), LAUNCH.min * 1000);
     const why = setTimeout(() => setLate(true), LAUNCH.lineAfter * 1000);
@@ -82,8 +87,11 @@ export function LaunchSplash({ ready, fontsReady, onShown, onDone, waiting, dusk
   // Once it starts leaving it goes, whatever happens next.
   const [leaving, setLeaving] = useState(false);
   useEffect(() => {
-    if (ready && played) setLeaving(true);
-  }, [ready, played]);
+    // Ready within its first frames (the session and workspace kept from last time), it leaves at once.
+    if (!ready) return;
+    if (!played && !launchesAtOnce(Date.now() - startedAt)) return;
+    setLeaving(true);
+  }, [ready, played, startedAt]);
   const asking = Boolean(waiting) && !leaving;
   const line = leaving || asking ? null : waitLine(late, offline);
 
@@ -128,6 +136,8 @@ export function LaunchSplash({ ready, fontsReady, onShown, onDone, waiting, dusk
   const finish = useCallback(() => done.current(), []);
   useEffect(() => {
     if (!leaving) return;
+    // The app is in view from the start of the fade: Conversas plays its arrival under it.
+    markRevealed();
     const end = (finished?: boolean) => {
       "worklet";
       if (finished) scheduleOnRN(finish);
@@ -139,7 +149,7 @@ export function LaunchSplash({ ready, fontsReady, onShown, onDone, waiting, dusk
     // The handover into the app, one gesture: the agent lifts away toward the top (where the app's bar will be) as
     // the sky sinks to the horizon and the splash thins out over the screen under it, so the home is seen arriving
     // through it rather than cut to. On-screen moves on the strong ease-in-out, the fade on ease-out.
-    const ms = LAUNCH.exit * 1000;
+    const ms = EXIT_S * 1000;
     away.value = withTiming(1, { duration: ms * 0.6, easing: EASE_IN_OUT });
     level.value = withTiming(0, { duration: ms, easing: EASE_IN_OUT });
     shown.value = withDelay(ms * 0.25, withTiming(0, { duration: ms * 0.75, easing: EASE_OUT }, end));

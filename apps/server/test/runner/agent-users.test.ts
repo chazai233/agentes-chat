@@ -1,6 +1,16 @@
 import { afterEach, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { writeAgents } from "../../runner/access";
 import { accountSelfCheck, REFUSED, type SelfCheck } from "../../runner/account-check";
@@ -20,21 +30,26 @@ import {
   denySchedulers,
   ensureContainers,
   ensureSubids,
+  joinKvm,
   keepContainers,
   readAccountUsers,
   readAgentUsers,
   rootlessContainers,
+  rootlessDocker,
   SUBIDS,
   stopAccountScopes,
   stopContainers,
   systemLauncher,
   trustedNetworkLauncher,
 } from "../../runner/agent-users";
-import { agentCategorySlice, agentSlice, type RunCommand } from "../../runner/service";
+import { writeConfig } from "../../runner/config";
+import { AGENT_DISK_TMP_ROOT, agentCategorySlice, agentSlice, type RunCommand } from "../../runner/service";
 import { errorCode, removeDirs, tempDir } from "./helpers";
 
 /** A root-owned executable that is no link: `/usr/bin/true` is one where coreutils is a multicall binary (Ubuntu 26.04). */
 const ROOT_TOOL = realpathSync("/usr/bin/true");
+/** How every launch becomes ag-a1b2c3d4: setpriv, never through a PAM session (runuser, su). */
+const AS_AGENT = ["/usr/bin/setpriv", "--reuid=ag-a1b2c3d4", "--regid=ag-a1b2c3d4", "--init-groups", "--"];
 
 const dirs: string[] = [];
 afterEach(() => removeDirs(dirs));
@@ -311,7 +326,7 @@ test("the launcher: the agent's slice, its own temporary folders, its user, abso
     // A finished build's Gradle and Kotlin daemons give the memory back after 5 idle minutes, not 3 hours.
     GRADLE_OPTS: "-Dorg.gradle.daemon.idletimeout=300000",
   };
-  const launcher = systemLauncher(user, true, false, false);
+  const launcher = systemLauncher(user, true, false, false, false);
   const p = launcher.prefix;
   for (const systemd of [true, false])
     expect((systemLauncher(user, systemd, false).env.PATH ?? "").split(":")).not.toContain(env.AGENTES_SHARED_BIN);
@@ -337,7 +352,7 @@ test("the launcher: the agent's slice, its own temporary folders, its user, abso
     "-c",
   ]);
   expect(p.join("\n")).not.toContain("hidepid=");
-  expect(p.slice(19)).toEqual(["sh", "21003", "/usr/sbin/runuser", "-u", "ag-a1b2c3d4", "--"]);
+  expect(p.slice(19)).toEqual(["sh", "21003", ...AS_AGENT]);
   expect(launcher).toMatchObject({ env, home: "/home/ag-a1b2c3d4", tmp: "/run/agentes-runner-tmp/21003/tmp" });
   // Root on the computer: the agent's own tmpfs, mounted once (a lock, so two first launches don't stack two).
   expect((p[8] ?? "").split("\n")).toEqual([
@@ -351,6 +366,34 @@ test("the launcher: the agent's slice, its own temporary folders, its user, abso
     `flock "$r/.lock" sh -c 'mountpoint -q "$1" || mount -t tmpfs -o mode=0700,size=50%,nr_inodes=1m agentes-runner-tmp "$1"' sh "$d"`,
     'exec "$@"',
   ]);
+  // Its /tmp on disk (`agentTmpOnDisk`), at its first launch after a boot, under the same lock: the agents' own
+  // filesystem, made anew if this boot has none yet (half of what the disk has free, under a root-only folder), its
+  // folder there bound into its tmpfs. A later launch finds the tmpfs and changes nothing, so the agent keeps that /tmp
+  // until the next boot. Nothing else of the launch changes.
+  const onDisk = systemLauncher(user, true, false, false, true).prefix;
+  const diskStep = [
+    'mountpoint -q "$1" && exit',
+    'mkdir -p "$2/fs"',
+    'chmod 0700 "$2"',
+    'mountpoint -q "$2/fs" || { rm -f "$2/image"; truncate -s $(($(findmnt -bno AVAIL -T "$2") / 2)) "$2/image"; /usr/sbin/mkfs.ext4 -q -F -m 0 -i 4096 -O ^has_journal "$2/image"; mount -o loop,discard,nosuid,nodev "$2/image" "$2/fs"; }',
+    'mkdir -p "$2/fs/$3"',
+    'mount -t tmpfs -o mode=0700,size=50%,nr_inodes=1m agentes-runner-tmp "$1"',
+    'mkdir "$1/tmp"',
+    'mount --bind "$2/fs/$3" "$1/tmp"',
+  ].join("; ");
+  expect((onDisk[8] ?? "").split("\n")).toEqual([
+    "set -e",
+    "r=/run/agentes-runner-tmp",
+    'mkdir -p "$r"',
+    'chmod 0700 "$r"',
+    'd="$r/$1"',
+    'u="$1"',
+    "shift",
+    'mkdir -p "$d"',
+    `flock "$r/.lock" sh -ec '${diskStep}' sh "$d" /var/cache/agentes-runner-tmp "$u"`,
+    'exec "$@"',
+  ]);
+  expect(onDisk.filter((_, i) => i !== 8)).toEqual(p.filter((_, i) => i !== 8));
   // Root, in the agent's own mount namespace, before it becomes the agent: its folders under root-only ones, bound
   // over the shared ones (/tmp, /dev/shm and /run/lock from its tmpfs, /var/tmp from the disk); in its own /tmp only
   // mkdir, never a chmod an agent's link could aim.
@@ -376,15 +419,41 @@ test("the launcher: the agent's slice, its own temporary folders, its user, abso
     'exec "$@"',
   ]);
   // systemd 253 and later: a process the kernel stops for memory takes only itself, not the rest of the scope.
-  const keeps = systemLauncher(user, true, true, false).prefix;
+  const keeps = systemLauncher(user, true, true, false, false).prefix;
   expect(keeps.slice(3, 6)).toEqual(["--collect", "--property=OOMPolicy=continue", "--slice=agents-21003.slice"]);
   expect(keeps.slice(6)).toEqual(p.slice(5));
-  // No systemd as PID 1 (a container): runuser alone.
+  // No systemd as PID 1 (a container): becoming the agent alone.
   expect(systemLauncher(user, false)).toEqual({
-    prefix: ["/usr/sbin/runuser", "-u", "ag-a1b2c3d4", "--"],
+    prefix: AS_AGENT,
     env,
     home: "/home/ag-a1b2c3d4",
   });
+});
+
+test("where an agent's /tmp goes is the runner's config: in memory unless `agentTmpOnDisk`, for every launch and its containers service", () => {
+  const home = tempDir("tmp-switch-");
+  dirs.push(home);
+  const user = { id: ANA.id, user: "ag-a1b2c3d4", uid: 21003 };
+  const step = () => systemLauncher(user, true, false, false).prefix[8] ?? "";
+  const service = () => containersCommand(user, true).join("\n");
+  const before = process.env.AGENTES_RUNNER_HOME;
+  process.env.AGENTES_RUNNER_HOME = home;
+  try {
+    // Without the switch, the step as before: an upgrade moves no agent's /tmp and restarts no containers service.
+    expect(step()).toBe(systemLauncher(user, true, false, false, false).prefix[8] ?? "");
+    expect(step()).not.toContain(AGENT_DISK_TMP_ROOT);
+    expect(service()).toContain(step());
+    writeConfig({ mode: "system", agentTmpOnDisk: true }, home);
+    expect(step()).toBe(systemLauncher(user, true, false, false, true).prefix[8] ?? "");
+    expect(step()).toContain(AGENT_DISK_TMP_ROOT);
+    expect(service()).toContain(step());
+    // A config it can't read keeps /tmp in memory, never a launch that fails.
+    writeFileSync(path.join(home, "config.json"), "{");
+    expect(step()).not.toContain(AGENT_DISK_TMP_ROOT);
+  } finally {
+    if (before === undefined) delete process.env.AGENTES_RUNNER_HOME;
+    else process.env.AGENTES_RUNNER_HOME = before;
+  }
 });
 
 test("an agent's user can't schedule cron or at jobs, which would run outside its launcher", () => {
@@ -498,13 +567,16 @@ test("a privileged network hook rejects writable ancestors, symlinks and non-exe
   expect(() => trustedNetworkLauncher("launch", stats())).toThrow();
 });
 
-test.if(process.platform !== "win32")("the optional namespace launcher precedes runuser for every agent launch", () => {
-  const prefix = systemLauncher(
-    { id: ANA.id, user: "ag-a1b2c3d4", uid: 21000, networkLauncher: ROOT_TOOL },
-    false,
-  ).prefix;
-  expect(prefix).toEqual([ROOT_TOOL, "21000", "--", "/usr/sbin/runuser", "-u", "ag-a1b2c3d4", "--"]);
-});
+test.if(process.platform !== "win32")(
+  "the optional namespace launcher precedes becoming the agent for every launch",
+  () => {
+    const prefix = systemLauncher(
+      { id: ANA.id, user: "ag-a1b2c3d4", uid: 21000, networkLauncher: ROOT_TOOL },
+      false,
+    ).prefix;
+    expect(prefix).toEqual([ROOT_TOOL, "21000", "--", ...AS_AGENT]);
+  },
+);
 
 test("a configured routing mark drops network capabilities even without a namespace hook", () => {
   const user = { id: "a1b2c3d4", user: "ag-a1b2c3d4", uid: 21000, networkMark: 0x08000000 };
@@ -513,16 +585,32 @@ test("a configured routing mark drops network capabilities even without a namesp
     "--no-new-privs",
     "--bounding-set=-net_admin,-net_raw",
     "--",
-    "/usr/sbin/runuser",
-    "-u",
-    user.user,
-    "--",
+    ...AS_AGENT,
   ]);
   const scoped = systemLauncher({ ...user, networkLauncher: ROOT_TOOL }, true).prefix;
   expect(scoped.indexOf(ROOT_TOOL)).toBeLessThan(scoped.indexOf("/usr/bin/setpriv"));
   expect(scoped.join("\n")).toContain("mount -t proc -o nosuid,nodev,noexec,hidepid=2 proc /proc");
-  expect(scoped.indexOf("/usr/bin/setpriv")).toBeLessThan(scoped.indexOf("/usr/sbin/runuser"));
-  expect(systemLauncher({ ...user, networkMark: undefined }, false).prefix[0]).toBe("/usr/sbin/runuser");
+  expect(scoped.slice(-AS_AGENT.length)).toEqual(AS_AGENT);
+  expect(systemLauncher({ ...user, networkMark: undefined }, false).prefix).toEqual(AS_AGENT);
+});
+
+test("no launch goes through runuser or su: only setpriv changes to the agent, and no PAM session can move it out of its slice", () => {
+  const user = { id: ANA.id, user: "ag-a1b2c3d4", uid: 21003 };
+  // Every way a command reaches an agent: a container (no systemd), its scope, its scope with a network hook and a
+  // routing mark, and its containers service.
+  const launches = [
+    systemLauncher(user, false).prefix,
+    systemLauncher(user, true, false, false, false).prefix,
+    systemLauncher({ ...user, networkLauncher: ROOT_TOOL, networkMark: 0x08000000 }, true).prefix,
+    containersCommand(user, true),
+  ];
+  for (const argv of launches) {
+    expect(argv.join(" ")).not.toContain("runuser");
+    expect(argv).not.toContain("/bin/su");
+    // setpriv, given the user's own group and its groups: what runuser -u did without a PAM session (Arch's runuser
+    // loads pam_systemd through `system-login`, which moves the process to user-<uid>.slice, #253).
+    expect(argv.join(" ")).toContain(`--reuid=${user.user} --regid=${user.user} --init-groups --`);
+  }
 });
 
 // ── Rootless containers (ADR 0169) ──────────────────────────────────────────
@@ -587,9 +675,100 @@ test("rootlessContainers: Podman and both id-map helpers, or none", () => {
   expect(rootlessContainers(have(["/usr/bin/newuidmap", "/usr/bin/newgidmap"]))).toBe(false);
 });
 
+test("rootlessDocker: the real CLI, dockerd and its rootless helpers, or none", () => {
+  const have = (files: string[]) => (file: string) => files.includes(file);
+  const all = ["/usr/bin/docker", "/usr/bin/dockerd", "/usr/bin/dockerd-rootless.sh", "/usr/bin/rootlesskit"];
+  expect(rootlessDocker(have(all))).toBe(true);
+  // A root daemon's install without docker-ce-rootless-extras: Podman keeps DOCKER_HOST.
+  expect(rootlessDocker(have(all.slice(0, 2)))).toBe(false);
+});
+
+test("with rootless Docker, every launch's docker reaches the agent's own daemon, podman still its Podman", () => {
+  const user = { id: ANA.id, user: "ag-a1b2c3d4", uid: 21003 };
+  expect(systemLauncher(user, true, false, true, false, true).env).toMatchObject({
+    XDG_RUNTIME_DIR: "/run/user/21003",
+    CONTAINER_HOST: "unix:///run/user/21003/podman/podman.sock",
+    DOCKER_HOST: "unix:///run/user/21003/docker.sock",
+  });
+  // No containers service, no daemon of its own.
+  expect(systemLauncher(user, true, false, false, false, true).env.DOCKER_HOST).toBeUndefined();
+});
+
+test.if(process.platform !== "win32")(
+  "the service's start with rootless Docker: its units in the runtime dir, its socket on, rewritten at every start",
+  () => {
+    const home = tempDir("containers-home-");
+    const runtime = tempDir("containers-run-");
+    dirs.push(home, runtime);
+    const argv = containersCommand({ id: ANA.id, user: "ag-a1b2c3d4", uid: 21003 }, true, undefined, true);
+    const [service = "", socket = "", connection = ""] = argv.slice(-3);
+    // The engine's own socket, never DOCKER_HOST's, and absolute paths: the system manager's ExecStart would read `%t`.
+    expect(service).toContain(
+      "ExecStart=/usr/bin/dockerd-rootless.sh --host=unix:///run/user/21003/docker-engine.sock",
+    );
+    expect(service).toContain("Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_NET=pasta");
+    expect(service).toContain("Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=true");
+    expect(service).toContain("Type=notify");
+    expect(socket).toContain("ListenStream=/run/user/21003/docker.sock");
+    expect(socket).toContain("SocketMode=0600");
+    expect(socket).toContain("Accept=yes");
+    expect(connection).toContain("Requires=docker.service");
+    expect(connection).toContain(
+      "ExecStart=/usr/bin/docker --host=unix:///run/user/21003/docker-engine.sock system dial-stdio",
+    );
+    expect(connection).toContain("StandardInput=socket");
+    for (const unit of [service, socket, connection]) expect(unit).not.toContain("%");
+    const lines = (argv.at(-7) ?? "").split("\n");
+    expect(lines.at(-1)).toBe("exec /usr/lib/systemd/systemd --user --log-target=journal");
+    const start = [...lines.slice(0, -3), "exit 0"].join("\n");
+    const sh = (units: string[]) =>
+      spawnSync("/bin/sh", ["-c", start, "sh", "conf", "storage", ...units], {
+        env: { HOME: home, XDG_RUNTIME_DIR: runtime, PATH: "/usr/bin:/bin" },
+      });
+    expect(sh(["one", "two", "three"]).status).toBe(0);
+    const r = path.join(runtime, "systemd/user");
+    expect(readFileSync(path.join(r, "docker.service"), "utf8")).toBe("one");
+    expect(readFileSync(path.join(r, "docker-api.socket"), "utf8")).toBe("two");
+    expect(readFileSync(path.join(r, "docker-api@.service"), "utf8")).toBe("three");
+    expect(readlinkSync(path.join(r, "sockets.target.wants/docker-api.socket"))).toBe("../docker-api.socket");
+    // A runner with other units writes them at the service's next start.
+    expect(sh(["four", "two", "three"]).status).toBe(0);
+    expect(readFileSync(path.join(r, "docker.service"), "utf8")).toBe("four");
+    // Without rootless Docker, nothing of Docker's.
+    rmSync(r, { recursive: true });
+    expect(sh([]).status).toBe(0);
+    expect(existsSync(path.join(r, "docker.service"))).toBe(false);
+  },
+);
+
+test.if(process.platform !== "win32")("joinKvm: the device's group when it opens to it, never root's", () => {
+  const dir = tempDir("kvm-");
+  dirs.push(dir);
+  const device = path.join(dir, "kvm");
+  const calls: string[] = [];
+  const run: RunCommand = (file, args) => {
+    calls.push([file, ...args].join(" "));
+    return { code: 0, output: "" };
+  };
+  // No device: nothing to join.
+  expect(joinKvm("ag-a1b2c3d4", device, run)).toBeNull();
+  writeFileSync(device, "");
+  chmodSync(device, 0o600);
+  expect(joinKvm("ag-a1b2c3d4", device, run)).toBeNull();
+  expect(calls).toEqual([]);
+  chmodSync(device, 0o660);
+  const { gid } = statSync(device);
+  expect(joinKvm("ag-a1b2c3d4", device, run)).toBeNull();
+  expect(calls).toEqual(gid === 0 ? [] : [`usermod -aG ${gid} ag-a1b2c3d4`]);
+  const refused: RunCommand = () => ({ code: 6, output: "usermod: group does not exist" });
+  expect(joinKvm("ag-a1b2c3d4", device, refused)).toBe(
+    gid === 0 ? null : "usermod failed (6): usermod: group does not exist",
+  );
+});
+
 test("every launch with containers: its runtime dir bound in its view, Podman's socket, no_new_privs as before", () => {
   const user = { id: ANA.id, user: "ag-a1b2c3d4", uid: 21003, networkMark: 0x08000000 };
-  const l = systemLauncher(user, true, false, true);
+  const l = systemLauncher(user, true, false, true, undefined, false);
   const socket = "unix:///run/user/21003/podman/podman.sock";
   expect(l.env).toMatchObject({ XDG_RUNTIME_DIR: "/run/user/21003", CONTAINER_HOST: socket, DOCKER_HOST: socket });
   const view = (l.prefix[18] ?? "").split("\n");
@@ -608,7 +787,7 @@ test("every launch with containers: its runtime dir bound in its view, Podman's 
 
 test("the containers service: a delegated unit of the agent's slice, its steps, set-user-ID for the id-map helpers alone", () => {
   const user = { id: ANA.id, user: "ag-a1b2c3d4", uid: 21003, networkLauncher: ROOT_TOOL, networkMark: 0x08000000 };
-  const argv = containersCommand(user, true);
+  const argv = containersCommand(user, true, undefined, false);
   // No --collect: a unit its start limit stopped stays loaded as failed, which is how the runner tells. Its steps'
   // stderr goes to the journal under one identifier, where the runner reads why.
   expect(argv.slice(0, 15)).toEqual([
@@ -632,7 +811,7 @@ test("the containers service: a delegated unit of the agent's slice, its steps, 
   // a `$$` sent there reaches the shell as its own pid. Unexpanded, the scripts go as they are.
   for (const arg of argv) expect(arg).not.toContain("$$");
   // Before 254 there is no switch: each `$` doubled, which systemd reads as one.
-  expect(containersCommand(user, false)).toEqual(
+  expect(containersCommand(user, false, undefined, false)).toEqual(
     argv.filter((a) => a !== "--expand-environment=no").map((a) => a.replaceAll("$", () => "$$")),
   );
   const at = argv.indexOf("/usr/bin/unshare");
@@ -666,10 +845,10 @@ test("the containers service: a delegated unit of the agent's slice, its steps, 
     "/run/agentes-runner-tmp/21003/cgroup",
     "/usr/bin/setpriv",
     "--bounding-set=-net_admin,-net_raw",
+    "--reuid=ag-a1b2c3d4",
+    "--regid=ag-a1b2c3d4",
+    "--init-groups",
     "--",
-    "/usr/sbin/runuser",
-    "-u",
-    "ag-a1b2c3d4",
   ]);
   expect(argv).not.toContain("--no-new-privs");
   expect(argv).toContain("XDG_RUNTIME_DIR=/run/user/21003");
@@ -680,7 +859,7 @@ test("the containers service: a delegated unit of the agent's slice, its steps, 
   // Its user manager logs to the journal: the console it would use otherwise is root's.
   expect(argv.at(-4)?.split("\n").at(-1)).toBe("exec /usr/lib/systemd/systemd --user --log-target=journal");
   // Without a network hook, /sys stays the computer's: nothing kept, nothing put back.
-  const plain = containersCommand({ id: ANA.id, user: "ag-a1b2c3d4", uid: 21003 }, true);
+  const plain = containersCommand({ id: ANA.id, user: "ag-a1b2c3d4", uid: 21003 }, true, undefined, false);
   expect(plain.join("\n")).not.toContain("/sys/fs/cgroup/cgroup.controllers");
   expect(plain.join("\n")).not.toContain('"$m/cgroup"');
   expect(plain[plain.indexOf("/usr/bin/unshare") + 10]).toBe("/usr/bin/setpriv");
@@ -691,7 +870,7 @@ test.if(process.platform !== "win32")(
   () => {
     const home = tempDir("containers-home-");
     dirs.push(home);
-    const argv = containersCommand({ id: ANA.id, user: "ag-a1b2c3d4", uid: 21003 }, true);
+    const argv = containersCommand({ id: ANA.id, user: "ag-a1b2c3d4", uid: 21003 }, true, undefined, false);
     const lines = (argv.at(-4) ?? "").split("\n");
     // Its cgroup checked, then its user manager: neither runs here.
     expect(lines.at(-1)).toBe("exec /usr/lib/systemd/systemd --user --log-target=journal");
@@ -724,7 +903,7 @@ test.if(process.platform !== "win32")(
     writeFileSync(path.join(bin, "sed"), "#!/bin/sh\necho /agents.slice/agents-21003.slice/nowhere.service\n", {
       mode: 0o755,
     });
-    const argv = containersCommand({ id: ANA.id, user: "ag-a1b2c3d4", uid: 21003 }, true);
+    const argv = containersCommand({ id: ANA.id, user: "ag-a1b2c3d4", uid: 21003 }, true, undefined, false);
     const r = spawnSync("/bin/sh", ["-c", argv.at(-4) ?? "", "sh", "conf", "storage"], {
       env: { HOME: home, PATH: `${bin}:/usr/bin:/bin` },
       encoding: "utf8",
@@ -1061,6 +1240,7 @@ test.if(process.platform !== "win32")(
       mask("/srv/agentes"),
       mask("/var/lib/agentes-runner-agents"),
       mask("/var/cache/agentes-git"),
+      mask("/var/lib/agentes-runner-grok"),
       mask("/var/lib/agentes-claude"),
       `mkdir -p ${a}/config ${a}/run/21000`,
       `mount --bind /tmp/.a/config ${a}/config`,

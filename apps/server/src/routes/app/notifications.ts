@@ -2,6 +2,7 @@ import { SCREEN_KINDS } from "@agenteschat/adapters";
 import {
   askAdmins,
   listNotifications,
+  markAllNotificationsDone,
   markAllNotificationsRead,
   markNotificationDone,
   markNotificationRead,
@@ -57,6 +58,9 @@ export const NotificationSource = z.object({
     .optional()
     .openapi({ description: "`widget_alert`, `widget_failed`, `dashboard_proposal`: the board (ADR 0135)." }),
   widgetId: z.string().optional().openapi({ description: "`widget_alert`, `widget_failed`: the widget." }),
+  artifactId: z.string().optional().openapi({
+    description: "A message in a live file's conversation (ADR 0199): the file, opened with it at `messageId`.",
+  }),
   accountId: z
     .string()
     .optional()
@@ -236,6 +240,25 @@ export function notificationRoutes(deps: AppDeps) {
       const { orgId } = c.req.valid("param");
       const { filter } = c.req.valid("json");
       return c.json(await markAllNotificationsRead(nd, c.get("user").id, orgId, filter), 200);
+    },
+  );
+
+  app.openapi(
+    createRoute({
+      method: "post",
+      path: "/organizations/{orgId}/notifications/done-all",
+      tags,
+      security,
+      summary: "Done for everything (in a filter) but what waits on you; returns the ids changed, for the undo",
+      description:
+        "Each leaves the inbox as with `POST …/{notificationId}/done` (undo it there with `done: false`). Approvals and questions waiting on you stay until answered; `waiting` and `done` change nothing.",
+      request: { params: OrgParams, body: body(z.object({ filter: Filter.optional() })) },
+      responses: { 200: json(z.object({ ids: z.array(z.uuid()) })), ...errors },
+    }),
+    async (c) => {
+      const { orgId } = c.req.valid("param");
+      const { filter } = c.req.valid("json");
+      return c.json(await markAllNotificationsDone(nd, c.get("user").id, orgId, filter), 200);
     },
   );
 

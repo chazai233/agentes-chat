@@ -2,18 +2,21 @@ import type { TFunction } from "i18next";
 import type { AgentStatusLine, ConsultationWait, RunConsultation } from "../api/types";
 import type { LiveConsult, LiveConsultStatus } from "../realtime/consults";
 import type { LiveRun } from "../realtime/streams";
+import type { TypingWho } from "../realtime/typing";
 import { formatLineTime, joinNames } from "./format";
 import { agentGrammar } from "./grammar";
 import { MAIL_BRANDS } from "./mail";
 
 /**
  * What the typing bar says someone is doing: "Theo está pensando…", "Theo
- * está consultando o GitHub…", "Marina está digitando…". Agents' verbs come
- * from the tool they are calling (`agent.tool`, see realtime/streams.ts).
+ * está consultando o GitHub…", "Marina está digitando…", "Marina está gravando
+ * áudio…". Agents' verbs come from the tool they are calling (`agent.tool`, see
+ * realtime/streams.ts); people only type or record.
  */
 export type ActivityKind =
   | "thinking"
   | "typing"
+  | "recordingVoice"
   | "writing"
   | "consulting"
   | "creatingIssue"
@@ -71,6 +74,7 @@ export type ActivityKind =
   | "offeringConnectApp"
   | "offeringSkill"
   | "updatingSkills"
+  | "creatingSkill"
   | "offeringInvites"
   | "proposingAgent"
   | "askingAgent"
@@ -157,6 +161,20 @@ const BUILTIN: Record<string, ActivityKind> = {
   list_artifacts: "readingDrive",
   create_artifact: "writingDrive",
   update_artifact: "writingDrive",
+  // Live files (ADR 0196 §6): the file's own page shows where the agent works; the bar says it is in the Drive.
+  read_spreadsheet: "readingDrive",
+  read_presentation: "readingDrive",
+  read_canvas: "readingDrive",
+  read_document: "readingDrive",
+  create_spreadsheet: "writingDrive",
+  edit_spreadsheet: "writingDrive",
+  create_presentation: "writingDrive",
+  edit_presentation: "writingDrive",
+  create_canvas: "writingDrive",
+  edit_canvas: "writingDrive",
+  edit_document: "writingDrive",
+  // Images onto a canvas through the workspace's image AI (ADR 0197).
+  generate_image: "creatingImage",
   search_context: "searchingMemory",
   expand: "searchingMemory",
   get_summary: "searchingMemory",
@@ -220,6 +238,7 @@ const BUILTIN: Record<string, ActivityKind> = {
   offer_invites: "offeringInvites",
   offer_install_skill: "offeringSkill",
   update_skill_from_source: "updatingSkills",
+  create_skill: "creatingSkill",
   propose_agent: "proposingAgent",
   // Another agent of the team (the consultation card says who and what it answered).
   ask_agent: "askingAgent",
@@ -236,12 +255,15 @@ const BUILTIN: Record<string, ActivityKind> = {
   use_tool: "findingTools",
   follow_up: "followingUp",
   get_my_usage: "checkingUsage",
+  ignore_usage_limit: "updatingWork",
   find_agent: "findingAgent",
+  read_agent: "findingAgent",
   // The right hand's look at the team: its tasks, open and stuck, and what waits.
   team_status: "listingTasks",
   cancel_follow_up: "cancelingFollowUp",
   web_search: "searchingWeb",
   web_fetch: "readingWeb",
+  image_search: "searchingWeb",
   read_conversation: "readingConversation",
   // A card of ours in the conversation: the card itself says what it holds.
   show_block: "preparingCard",
@@ -270,6 +292,8 @@ const BUILTIN: Record<string, ActivityKind> = {
   request_branch_push: "pushingBranch",
   delete_branches: "deletingBranches",
   post_message: "postingMessage",
+  // The line it says before slow work (ADR 0207): a message of its own, never a line of the work (`work.ts`).
+  say_now: "postingMessage",
   send_dm: "sendingDm",
   set_status: "settingStatus",
   set_reply_style: "settingReplyStyle",
@@ -328,12 +352,35 @@ const CONNECTORS: Record<string, string> = {
 const isDrive = (id: string) => id === "drive" || id === "google_drive";
 /** A connection's service as its name says it: "Google Drive (ana@acme.com) 2" → "google_drive". */
 export const serviceKey = (label: string) =>
-  label
-    .replace(/\s+\d+$/, "")
-    .replace(/\s*\([^)]*\)$/, "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "_");
+  withoutParensAtEnd(withoutNumberAtEnd(label)).trim().toLowerCase().replace(/\s+/g, "_");
+
+// A connection's name is read by index from its end: the patterns `/\s+\d+$/` and `/\s*\([^)]*\)$/` read the rest of
+// the name again from each space (or `(`) of a long run, quadratic in its length.
+
+const isSpace = (ch: string) => /\s/.test(ch);
+const isDigit = (ch: string) => ch >= "0" && ch <= "9";
+
+/** `label` without the number it ends with and the spaces before it ("Google Drive 2"), when there are both. */
+function withoutNumberAtEnd(label: string): string {
+  let digits = label.length;
+  while (digits > 0 && isDigit(label.charAt(digits - 1))) digits--;
+  let start = digits;
+  while (start > 0 && isSpace(label.charAt(start - 1))) start--;
+  return digits < label.length && start < digits ? label.slice(0, start) : label;
+}
+
+/**
+ * `label` without what it ends with in parentheses and the spaces before it ("Google Drive (ana@acme.com)"): from
+ * the first `(` after the `)` before the last one.
+ */
+function withoutParensAtEnd(label: string): string {
+  if (!label.endsWith(")")) return label;
+  const open = label.indexOf("(", label.lastIndexOf(")", label.length - 2) + 1);
+  if (open < 0) return label;
+  let start = open;
+  while (start > 0 && isSpace(label.charAt(start - 1))) start--;
+  return label.slice(0, start);
+}
 
 /** One of the org's mailboxes' tools (`mail_<slug>_<verb>`, ADR 0038), also through the executor's MCP. */
 const MAILBOX_TOOL = /^(?:mcp__agentes__)?mail_[a-z0-9]+_[a-z]+$/;
@@ -499,11 +546,11 @@ export const waitsForWords = (r: Pick<LiveRun, "status">) =>
 
 /**
  * Who shows in the bar, in order: agents asking another agent (`consults`), agents at work (thinking, at a tool or
- * writing: their words show whole once posted), then people typing.
+ * writing: their words show whole once posted), then people typing or recording a voice message.
  */
 export function barEntries(
   runs: LiveRun[],
-  typingUserIds: string[],
+  typing: TypingWho[],
   agentName: (id: string) => string,
   personName: (id: string) => string | undefined,
   consults: ConsultWithDetails[] = [],
@@ -548,9 +595,10 @@ export function barEntries(
         r.status === "running" && !r.tool ? { kind: "writing" } : toolActivity(r.tool, r.connector, r.toolDetail, r),
     });
   }
-  for (const id of typingUserIds) {
+  for (const { id, kind } of typing) {
     const name = personName(id);
-    if (name) out.push({ id, type: "person", name, activity: { kind: "typing" } });
+    if (name)
+      out.push({ id, type: "person", name, activity: { kind: kind === "voice" ? "recordingVoice" : "typing" } });
   }
   return out;
 }
@@ -558,12 +606,40 @@ export function barEntries(
 /** How many small faces the bar stacks, however many are at work (the sentence says "e mais N"). */
 export const BAR_FACES = 3;
 
-/** The faces the bar stacks: agents first, and at least one person typing when someone is. */
+/** What people do in the bar, in the order the bar says it. */
+const PERSON_VERBS = ["typing", "recordingVoice"] as const;
+type PersonVerb = (typeof PERSON_VERBS)[number];
+
+const doing = (e: ActivityEntry, kind: PersonVerb) => e.type === "person" && e.activity.kind === kind;
+
+/**
+ * The faces the bar stacks: agents first, and at least one person typing when someone is. Who records shows after the
+ * words, with their mark (`facesOf`); while someone records, who types does too (`bothAtIt`).
+ */
 export function barFaces(entries: ActivityEntry[]): ActivityEntry[] {
   const agents = entries.filter((e) => e.type === "agent");
-  const people = entries.filter((e) => e.type === "person");
+  const people = bothAtIt(entries) ? [] : entries.filter((e) => doing(e, "typing"));
   const shown = agents.slice(0, people.length > 0 ? BAR_FACES - 1 : BAR_FACES);
   return [...shown, ...people.slice(0, BAR_FACES - shown.length)];
+}
+
+/** Who does it, a few faces at most: a group drawn by its words, after its mark. */
+export const facesOf = (entries: ActivityEntry[], kind: PersonVerb) =>
+  entries.filter((e) => doing(e, kind)).slice(0, BAR_FACES);
+
+/** Whether someone types (the bar's dots), beside whatever else happens. */
+export const someoneTypes = (entries: ActivityEntry[]) => entries.some((e) => doing(e, "typing"));
+
+/** Someone types while someone records: each verb then has its own mark and faces, by its words. */
+export const bothAtIt = (entries: ActivityEntry[]) =>
+  someoneTypes(entries) && entries.some((e) => doing(e, "recordingVoice"));
+
+/** The people at it by what they do, writing first: each group's names and its verb ("gravando áudio"). */
+export function peopleGroups(entries: ActivityEntry[]): { kind: PersonVerb; names: string[] }[] {
+  return PERSON_VERBS.flatMap((kind) => {
+    const names = entries.flatMap((e) => (doing(e, kind) ? [e.name] : []));
+    return names.length > 0 ? [{ kind, names }] : [];
+  });
 }
 
 /** The question the bar tells and times: one agent's on its own (beside others, its reply tells it). */
@@ -758,22 +834,15 @@ function agentsPhrase(t: TFunction, entries: ActivityEntry[], mark: MarkName) {
   return doingPhrase(t, names, only?.activity ?? { kind: "thinking" }, mark);
 }
 
-const typingNames = (entries: ActivityEntry[]) => entries.flatMap((e) => (e.type === "person" ? [e.name] : []));
-
 const PHRASES_SEP = " · ";
-
-/** "Marina está digitando"; "" when nobody types. */
-function typingPhrase(t: TFunction, entries: ActivityEntry[], mark: MarkName) {
-  const people = typingNames(entries);
-  return people.length > 0 ? doingPhrase(t, people, { kind: "typing" }, mark) : "";
-}
 
 /**
  * The bar's sentence, one short line however many are at work: "Theo e mais 2 estão trabalhando · Marina
- * está digitando…"; "" when nobody. `mark` wraps each name (for bold).
+ * está digitando · Rui está gravando áudio…"; "" when nobody. `mark` wraps each name (for bold).
  */
 export function activitySentence(t: TFunction, entries: ActivityEntry[], mark: MarkName = plain) {
-  const phrases = [agentsPhrase(t, entries, mark), typingPhrase(t, entries, mark)].filter(Boolean);
+  const people = peopleGroups(entries).map((g) => doingPhrase(t, g.names, { kind: g.kind }, mark));
+  const phrases = [agentsPhrase(t, entries, mark), ...people].filter(Boolean);
   return phrases.length > 0 ? `${phrases.join(PHRASES_SEP)}…` : "";
 }
 
@@ -791,21 +860,48 @@ export function barPhrase(t: TFunction, entries: ActivityEntry[], mark: MarkName
   return activitySentence(t, entries, mark);
 }
 
+/** A group's phrase in two pieces, its names then what they do; a language that puts the names later keeps it whole. */
+function namesFirst(t: TFunction, names: string[], kind: PersonVerb, mark: MarkName): [string, string] {
+  const phrase = doingPhrase(t, names, { kind }, mark);
+  const listed = listNames(t, names, mark);
+  const at = phrase.startsWith(listed) ? listed.length : 0;
+  return [phrase.slice(0, at), phrase.slice(at)];
+}
+
 /**
  * `barPhrase` in pieces, in the order they give way when the bar is short: the agents' words (then the " · "
  * after them, so it never leads the line), the names of who is typing, and never what they do (" está
- * digitando…"). Joined, they read as `barPhrase`; all but the first are "" when nobody types.
+ * digitando"), then who records a voice message the same way (" está gravando áudio"), after a " · " of its own
+ * when someone types. The last phrase ends in "…". Joined, they read as `barPhrase`; all but the first are "" when
+ * no person is at it.
  */
 export function barWords(
   t: TFunction,
   entries: ActivityEntry[],
   mark: MarkName = plain,
-): [agents: string, sep: string, typers: string, typing: string] {
-  const typing = typingPhrase(t, entries, mark);
-  if (!typing) return [barPhrase(t, entries, mark), "", "", ""];
+): [
+  agents: string,
+  sep: string,
+  typers: string,
+  typing: string,
+  voiceSep: string,
+  recorders: string,
+  recording: string,
+] {
+  const groups = peopleGroups(entries);
+  if (groups.length === 0) return [barPhrase(t, entries, mark), "", "", "", "", "", ""];
   const agents = agentsPhrase(t, entries, mark);
-  // The names lead the phrase in pt-BR and en; a language that puts them later keeps the phrase whole.
-  const names = listNames(t, typingNames(entries), mark);
-  const at = typing.startsWith(names) ? names.length : 0;
-  return [agents, agents ? PHRASES_SEP : "", typing.slice(0, at), `${typing.slice(at)}…`];
+  const typing = groups.find((g) => g.kind === "typing");
+  const voice = groups.find((g) => g.kind === "recordingVoice");
+  const [typers, typed] = typing ? namesFirst(t, typing.names, typing.kind, mark) : ["", ""];
+  const [recorders, recorded] = voice ? namesFirst(t, voice.names, voice.kind, mark) : ["", ""];
+  return [
+    agents,
+    agents ? PHRASES_SEP : "",
+    typers,
+    typed && !voice ? `${typed}…` : typed,
+    typing && voice ? PHRASES_SEP : "",
+    recorders,
+    recorded && `${recorded}…`,
+  ];
 }

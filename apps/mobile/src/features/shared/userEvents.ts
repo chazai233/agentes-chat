@@ -3,6 +3,7 @@ import {
   applyComputerEvent,
   applyDashboardEvent,
   applyIssueEvent,
+  applyLiveEvent,
   applyMachineEvent,
   applyNotificationEvent,
   applyUnreadEvent,
@@ -10,12 +11,13 @@ import {
   cacheApproval,
   isNotificationEvent,
   keys,
+  readConversationListsNow,
   refreshMission,
   refreshProposals,
   type ThreadFollowEvent,
   type ThreadInfo,
 } from "@agenteschat/client";
-import { playSound, soundForNotification } from "@agenteschat/client/lib/sounds";
+import { playSound, soundForEvent } from "@agenteschat/client/lib/sounds";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { AppState } from "react-native";
@@ -43,12 +45,13 @@ export function useUserEvents() {
         applyNotificationEvent(qc, orgId, event);
         // The island at the top (ADR 0071 §9): what reaches me while the app is open, and what I settled elsewhere.
         feedIsland(event);
-        // Something new reached you somewhere: the conversation list's unread and last lines.
+        // Something new reached you somewhere: the conversation list's unread and last lines, at once. A fetch under
+        // way serves a burst (the undo of "Clear all" restores row by row); a new one stands for the burst read
+        // the message's own `channel.activity` queued.
         if (event.type === "notification.upserted") {
-          void qc.invalidateQueries({ queryKey: keys.channels(orgId) });
-          void qc.invalidateQueries({ queryKey: keys.dms(orgId) });
+          readConversationListsNow(qc, orgId);
           // Its sound (ADR 0070); the push covers the app in the background.
-          const sound = soundForNotification(event.notification, AppState.currentState !== "active");
+          const sound = soundForEvent(event, AppState.currentState !== "active");
           if (sound) playSound(sound);
         }
       }
@@ -73,6 +76,8 @@ export function useUserEvents() {
       applyWorkspaceEvent(qc, orgId, event);
       // Dashboards and widgets (ADR 0135): a board changed, a widget updated, failed or was removed.
       applyDashboardEvent(qc, orgId, event);
+      // Who is in a Drive file now (ADR 0196 §5): the cards showing it ask again.
+      applyLiveEvent(qc, orgId, event);
       // Org event: someone changed the task board's columns or projects. Deleting a column moves its tasks and
       // a project's name is on its cards, so the tasks refresh too (both live under the same key).
       if (event.type === "issue.columns" || event.type === "issue.projects")
@@ -87,33 +92,10 @@ export function useUserEvents() {
       if (event.type.startsWith("mission.") && "missionId" in event && typeof event.missionId === "string")
         refreshMission(qc, orgId, event.missionId);
     });
-    // Missed while offline: the inbox, its badge and the requests catch up.
-    const offReconnect = connection.onReconnect(() => {
-      void qc.invalidateQueries({ queryKey: keys.notifications(orgId) });
-      void qc.invalidateQueries({ queryKey: keys.approvals(orgId) });
-      // The organization's standing may have changed meanwhile (the suspended screen), and so may the workspace's
-      // computer on its way, the computers and the agents' screens.
-      void qc.invalidateQueries({ queryKey: keys.me });
-      void qc.invalidateQueries({ queryKey: keys.computerSetup(orgId) });
-      void qc.invalidateQueries({ queryKey: keys.machines(orgId) });
-      void qc.invalidateQueries({ queryKey: keys.agentDesktops(orgId) });
-      // The groups of agents someone changed meanwhile.
-      void qc.invalidateQueries({ queryKey: keys.agentGroups(orgId) });
-      // Boards and widgets that changed meanwhile.
-      void qc.invalidateQueries({ queryKey: keys.dashboards(orgId) });
-      // The Drive, the Wiki, the calendar, the routines and the invitations someone changed meanwhile.
-      for (const key of [
-        keys.artifacts(orgId),
-        keys.wiki(orgId),
-        keys.calendar(orgId),
-        keys.routines(orgId),
-        keys.invitations(orgId),
-      ])
-        void qc.invalidateQueries({ queryKey: key });
-    });
+    // Missed while offline (the inbox, the requests, the standing, the computers, the lists): `RealtimeProvider` reads
+    // everything again on a reconnect; reading them here too would only start those reads over.
     return () => {
       offUser();
-      offReconnect();
       // In the background, or another workspace: its notices go (the inbox keeps them).
       island.clear();
     };
